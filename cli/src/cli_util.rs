@@ -2871,6 +2871,12 @@ impl From<String> for RevisionArg {
     }
 }
 
+impl From<&'static str> for RevisionArg {
+    fn from(s: &'static str) -> Self {
+        RevisionArg(s.into())
+    }
+}
+
 impl AsRef<str> for RevisionArg {
     fn as_ref(&self) -> &str {
         &self.0
