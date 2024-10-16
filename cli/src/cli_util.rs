@@ -1163,7 +1163,7 @@ impl WorkspaceCommandHelper {
     }
 
     #[cfg(feature = "git")]
-    fn git_backend(&self) -> Option<&jj_lib::git_backend::GitBackend> {
+    pub fn git_backend(&self) -> Option<&jj_lib::git_backend::GitBackend> {
         self.user_repo.repo.store().backend_impl().downcast_ref()
     }
 
@@ -3171,6 +3171,12 @@ impl RevisionArg {
 
 impl From<String> for RevisionArg {
     fn from(s: String) -> Self {
+        RevisionArg(s.into())
+    }
+}
+
+impl From<&'static str> for RevisionArg {
+    fn from(s: &'static str) -> Self {
         RevisionArg(s.into())
     }
 }
