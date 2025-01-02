@@ -14,6 +14,8 @@
 
 use std::path::Path;
 
+use test_case::test_case;
+
 use crate::common::TestEnvironment;
 
 /// Test adding a second workspace
@@ -46,13 +48,13 @@ fn test_workspaces_add_second_workspace() {
 
     // Can see the working-copy commit in each workspace in the log output. The "@"
     // node in the graph indicates the current workspace's working-copy commit.
-    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r###"
-    ○  5ed2222c28e2 second@
-    │ @  8183d0fcaa4c default@
+    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r"
+    @  8183d0fcaa4c default@
+    │ ○  5ed2222c28e2 second@
     ├─╯
     ○  751b12b7b981
     ◆  000000000000
-    "###);
+    ");
     insta::assert_snapshot!(get_log_output(&test_env, &secondary_path), @r###"
     @  5ed2222c28e2 second@
     │ ○  8183d0fcaa4c default@
@@ -143,16 +145,16 @@ fn test_workspaces_add_second_workspace_on_merge() {
     );
 
     // The new workspace's working-copy commit shares all parents with the old one.
-    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r###"
-    ○    7013a493bd09 second@
+    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r"
+    @    35e47bff781e default@
     ├─╮
-    │ │ @  35e47bff781e default@
+    │ │ ○  7013a493bd09 second@
     ╭─┬─╯
     │ ○  444b77e99d43
     ○ │  1694f2ddf8ec
     ├─╯
     ◆  000000000000
-    "###);
+    ");
 }
 
 /// Test that --ignore-working-copy is respected
@@ -280,14 +282,14 @@ fn test_workspaces_add_workspace_at_revision() {
 
     // Can see the working-copy commit in each workspace in the log output. The "@"
     // node in the graph indicates the current workspace's working-copy commit.
-    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r###"
-    ○  e374e74aa0c8 second@
-    │ @  dadeedb493e8 default@
-    │ ○  c420244c6398
+    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r"
+    @  dadeedb493e8 default@
+    ○  c420244c6398
+    │ ○  e374e74aa0c8 second@
     ├─╯
     ○  f6097c2f7cac
     ◆  000000000000
-    "###);
+    ");
     insta::assert_snapshot!(get_log_output(&test_env, &secondary_path), @r###"
     @  e374e74aa0c8 second@
     │ ○  dadeedb493e8 default@
@@ -350,18 +352,18 @@ fn test_workspaces_add_workspace_multiple_revisions() {
     Added 3 files, modified 0 files, removed 0 files
     "###);
 
-    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r###"
-    ○      f4fa64f40944 merge@
-    ├─┬─╮
-    │ │ ○  f6097c2f7cac
-    │ ○ │  544cd61f2d26
-    │ ├─╯
-    ○ │  6c843d62ca29
-    ├─╯
-    │ @  5b36783cd11c default@
+    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r"
+    @  5b36783cd11c default@
+    │ ○      f4fa64f40944 merge@
+    │ ├─┬─╮
+    │ │ │ ○  f6097c2f7cac
+    ├─────╯
+    │ │ ○  544cd61f2d26
+    ├───╯
+    │ ○  6c843d62ca29
     ├─╯
     ◆  000000000000
-    "###);
+    ");
 }
 
 #[test]
@@ -469,13 +471,13 @@ fn test_workspaces_conflicting_edits() {
 
     test_env.jj_cmd_ok(&main_path, &["workspace", "add", "../secondary"]);
 
-    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r###"
-    ○  3224de8ae048 secondary@
-    │ @  06b57f44a3ca default@
+    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r"
+    @  06b57f44a3ca default@
+    │ ○  3224de8ae048 secondary@
     ├─╯
     ○  506f4ec3c2c6
     ◆  000000000000
-    "###);
+    ");
 
     // Make changes in both working copies
     std::fs::write(main_path.join("file"), "changed in main\n").unwrap();
@@ -502,14 +504,14 @@ fn test_workspaces_conflicting_edits() {
     insta::assert_snapshot!(stderr, @r##"
     Error: The working copy is stale (not updated since operation c81af45155a2).
     Hint: Run `jj workspace update-stale` to update it.
-    See https://martinvonz.github.io/jj/latest/working-copy/#stale-working-copy for more information.
+    See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy for more information.
     "##);
     // Same error on second run, and from another command
     let stderr = test_env.jj_cmd_failure(&secondary_path, &["log"]);
     insta::assert_snapshot!(stderr, @r##"
     Error: The working copy is stale (not updated since operation c81af45155a2).
     Hint: Run `jj workspace update-stale` to update it.
-    See https://martinvonz.github.io/jj/latest/working-copy/#stale-working-copy for more information.
+    See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy for more information.
     "##);
     let (stdout, stderr) = test_env.jj_cmd_ok(&secondary_path, &["workspace", "update-stale"]);
     // It was detected that the working copy is now stale.
@@ -521,13 +523,14 @@ fn test_workspaces_conflicting_edits() {
     Rebased 1 descendant commits onto commits rewritten by other operation
     Working copy now at: pmmvwywv?? e82cd4ee (empty) (no description set)
     Added 0 files, modified 1 files, removed 0 files
+    Updated working copy to fresh commit e82cd4ee8faa
     "###);
     insta::assert_snapshot!(get_log_output(&test_env, &secondary_path),
     @r###"
-    ×  a28c85ce128b (divergent)
-    │ ○  a58c9a9b19ce default@
+    @  e82cd4ee8faa secondary@ (divergent)
+    │ ×  30816012e0da (divergent)
     ├─╯
-    │ @  e82cd4ee8faa secondary@ (divergent)
+    │ ○  a58c9a9b19ce default@
     ├─╯
     ○  d41244767d45
     ◆  000000000000
@@ -536,10 +539,10 @@ fn test_workspaces_conflicting_edits() {
     let stdout = get_log_output(&test_env, &secondary_path);
     assert!(!stdout.starts_with("The working copy is stale"));
     insta::assert_snapshot!(stdout, @r###"
-    ×  a28c85ce128b (divergent)
-    │ ○  a58c9a9b19ce default@
+    @  e82cd4ee8faa secondary@ (divergent)
+    │ ×  30816012e0da (divergent)
     ├─╯
-    │ @  e82cd4ee8faa secondary@ (divergent)
+    │ ○  a58c9a9b19ce default@
     ├─╯
     ○  d41244767d45
     ◆  000000000000
@@ -559,13 +562,13 @@ fn test_workspaces_updated_by_other() {
 
     test_env.jj_cmd_ok(&main_path, &["workspace", "add", "../secondary"]);
 
-    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r###"
-    ○  3224de8ae048 secondary@
-    │ @  06b57f44a3ca default@
+    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r"
+    @  06b57f44a3ca default@
+    │ ○  3224de8ae048 secondary@
     ├─╯
     ○  506f4ec3c2c6
     ◆  000000000000
-    "###);
+    ");
 
     // Rewrite the check-out commit in one workspace.
     std::fs::write(main_path.join("file"), "changed in main\n").unwrap();
@@ -589,7 +592,7 @@ fn test_workspaces_updated_by_other() {
     insta::assert_snapshot!(stderr, @r##"
     Error: The working copy is stale (not updated since operation c81af45155a2).
     Hint: Run `jj workspace update-stale` to update it.
-    See https://martinvonz.github.io/jj/latest/working-copy/#stale-working-copy for more information.
+    See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy for more information.
     "##);
     let (stdout, stderr) = test_env.jj_cmd_ok(&secondary_path, &["workspace", "update-stale"]);
     // It was detected that the working copy is now stale, but clean. So no
@@ -598,24 +601,95 @@ fn test_workspaces_updated_by_other() {
     insta::assert_snapshot!(stderr, @r###"
     Working copy now at: pmmvwywv e82cd4ee (empty) (no description set)
     Added 0 files, modified 1 files, removed 0 files
+    Updated working copy to fresh commit e82cd4ee8faa
     "###);
     insta::assert_snapshot!(get_log_output(&test_env, &secondary_path),
-    @r###"
-    ○  a58c9a9b19ce default@
-    │ @  e82cd4ee8faa secondary@
+    @r"
+    @  e82cd4ee8faa secondary@
+    │ ○  a58c9a9b19ce default@
+    ├─╯
+    ○  d41244767d45
+    ◆  000000000000
+    ");
+}
+
+/// Test a clean working copy that gets rewritten from another workspace
+#[test]
+fn test_workspaces_updated_by_other_automatic() {
+    let test_env = TestEnvironment::default();
+    test_env.add_config("[snapshot]\nauto-update-stale = true\n");
+
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "main"]);
+    let main_path = test_env.env_root().join("main");
+    let secondary_path = test_env.env_root().join("secondary");
+
+    std::fs::write(main_path.join("file"), "contents\n").unwrap();
+    test_env.jj_cmd_ok(&main_path, &["new"]);
+
+    test_env.jj_cmd_ok(&main_path, &["workspace", "add", "../secondary"]);
+
+    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r"
+    @  06b57f44a3ca default@
+    │ ○  3224de8ae048 secondary@
+    ├─╯
+    ○  506f4ec3c2c6
+    ◆  000000000000
+    ");
+
+    // Rewrite the check-out commit in one workspace.
+    std::fs::write(main_path.join("file"), "changed in main\n").unwrap();
+    let (stdout, stderr) = test_env.jj_cmd_ok(&main_path, &["squash"]);
+    insta::assert_snapshot!(stdout, @"");
+    insta::assert_snapshot!(stderr, @r###"
+    Rebased 1 descendant commits
+    Working copy now at: mzvwutvl a58c9a9b (empty) (no description set)
+    Parent commit      : qpvuntsm d4124476 (no description set)
+    "###);
+
+    // The secondary workspace's working-copy commit was updated.
+    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r###"
+    @  a58c9a9b19ce default@
+    │ ○  e82cd4ee8faa secondary@
     ├─╯
     ○  d41244767d45
     ◆  000000000000
     "###);
+
+    // The first working copy gets automatically updated.
+    let (stdout, stderr) = test_env.jj_cmd_ok(&secondary_path, &["st"]);
+    insta::assert_snapshot!(stdout, @r###"
+    The working copy is clean
+    Working copy : pmmvwywv e82cd4ee (empty) (no description set)
+    Parent commit: qpvuntsm d4124476 (no description set)
+    "###);
+    insta::assert_snapshot!(stderr, @r###"
+    Working copy now at: pmmvwywv e82cd4ee (empty) (no description set)
+    Added 0 files, modified 1 files, removed 0 files
+    Updated working copy to fresh commit e82cd4ee8faa
+    "###);
+
+    insta::assert_snapshot!(get_log_output(&test_env, &secondary_path),
+    @r"
+    @  e82cd4ee8faa secondary@
+    │ ○  a58c9a9b19ce default@
+    ├─╯
+    ○  d41244767d45
+    ◆  000000000000
+    ");
 }
 
-#[test]
-fn test_workspaces_current_op_discarded_by_other() {
+#[test_case(false; "manual")]
+#[test_case(true; "automatic")]
+fn test_workspaces_current_op_discarded_by_other(automatic: bool) {
     let test_env = TestEnvironment::default();
+    if automatic {
+        test_env.add_config("[snapshot]\nauto-update-stale = true\n");
+    }
+
     // Use the local backend because GitBackend::gc() depends on the git CLI.
     test_env.jj_cmd_ok(
         test_env.env_root(),
-        &["init", "main", "--config-toml=ui.allow-init-native=true"],
+        &["init", "main", "--config=ui.allow-init-native=true"],
     );
     let main_path = test_env.env_root().join("main");
     let secondary_path = test_env.env_root().join("secondary");
@@ -657,84 +731,115 @@ fn test_workspaces_current_op_discarded_by_other() {
             r#"id.short(10) ++ " " ++ description"#,
         ],
     );
-    insta::assert_snapshot!(stdout, @r#"
-    @  757bc1140b abandon commit 20dd439c4bd12c6ad56c187ac490bd0141804618f638dc5c4dc92ff9aecba20f152b23160db9dcf61beb31a5cb14091d9def5a36d11c9599cc4d2e5689236af1
-    ○  8d4abed655 create initial working-copy commit in workspace secondary
-    ○  3de27432e5 add workspace 'secondary'
-    ○  bcf69de808 new empty commit
-    ○  a36b99a15c snapshot working copy
-    ○  ddf023d319 new empty commit
-    ○  829c93f6a3 snapshot working copy
-    ○  2557266dd2 add workspace 'default'
-    ○  0000000000
-    "#);
+    insta::allow_duplicates! {
+        insta::assert_snapshot!(stdout, @r#"
+        @  757bc1140b abandon commit 20dd439c4bd12c6ad56c187ac490bd0141804618f638dc5c4dc92ff9aecba20f152b23160db9dcf61beb31a5cb14091d9def5a36d11c9599cc4d2e5689236af1
+        ○  8d4abed655 create initial working-copy commit in workspace secondary
+        ○  3de27432e5 add workspace 'secondary'
+        ○  bcf69de808 new empty commit
+        ○  a36b99a15c snapshot working copy
+        ○  ddf023d319 new empty commit
+        ○  829c93f6a3 snapshot working copy
+        ○  2557266dd2 add workspace 'default'
+        ○  0000000000
+        "#);
+    }
 
     // Abandon ops, including the one the secondary workspace is currently on.
     test_env.jj_cmd_ok(&main_path, &["operation", "abandon", "..@-"]);
     test_env.jj_cmd_ok(&main_path, &["util", "gc", "--expire=now"]);
 
-    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r###"
-    ○  96b31dafdc41 secondary@
-    │ @  6c051bd1ccd5 default@
-    ├─╯
-    ○  7c5b25a4fc8f
-    ◆  000000000000
-    "###);
+    insta::allow_duplicates! {
+        insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r"
+        @  6c051bd1ccd5 default@
+        │ ○  96b31dafdc41 secondary@
+        ├─╯
+        ○  7c5b25a4fc8f
+        ◆  000000000000
+        ");
+    }
 
-    let stderr = test_env.jj_cmd_failure(&secondary_path, &["st"]);
-    insta::assert_snapshot!(stderr, @r###"
-    Error: Could not read working copy's operation.
-    Hint: Run `jj workspace update-stale` to recover.
-    See https://martinvonz.github.io/jj/latest/working-copy/#stale-working-copy for more information.
-    "###);
+    if automatic {
+        // Run a no-op command to set the randomness seed for commit hashes.
+        test_env.jj_cmd_success(&secondary_path, &["help"]);
 
-    let (stdout, stderr) = test_env.jj_cmd_ok(&secondary_path, &["workspace", "update-stale"]);
-    insta::assert_snapshot!(stderr, @r#"
-    Failed to read working copy's current operation; attempting recovery. Error message from read attempt: Object 8d4abed655badb70b1bab62aa87136619dbc3c8015a8ce8dfb7abfeca4e2f36c713d8f84e070a0613907a6cee7e1cc05323fe1205a319b93fe978f11a060c33c of type operation not found
-    Created and checked out recovery commit 62f70695e3b0
-    "#);
-    insta::assert_snapshot!(stdout, @"");
+        let (stdout, stderr) = test_env.jj_cmd_ok(&secondary_path, &["st"]);
+        insta::assert_snapshot!(stdout, @r###"
+        Working copy changes:
+        A added
+        D deleted
+        M modified
+        Working copy : kmkuslsw 15df8cb5 RECOVERY COMMIT FROM `jj workspace update-stale`
+        Parent commit: rzvqmyuk 96b31daf (empty) (no description set)
+        "###);
+        insta::assert_snapshot!(stderr, @r###"
+        Failed to read working copy's current operation; attempting recovery. Error message from read attempt: Object 8d4abed655badb70b1bab62aa87136619dbc3c8015a8ce8dfb7abfeca4e2f36c713d8f84e070a0613907a6cee7e1cc05323fe1205a319b93fe978f11a060c33c of type operation not found
+        Created and checked out recovery commit 76d0126b3e5c
+        "###);
+    } else {
+        let stderr = test_env.jj_cmd_failure(&secondary_path, &["st"]);
+        insta::assert_snapshot!(stderr, @r###"
+        Error: Could not read working copy's operation.
+        Hint: Run `jj workspace update-stale` to recover.
+        See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy for more information.
+        "###);
 
-    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r###"
-    ○  b0b400439a82 secondary@
-    ○  96b31dafdc41
-    │ @  6c051bd1ccd5 default@
-    ├─╯
-    ○  7c5b25a4fc8f
-    ◆  000000000000
-    "###);
+        let (stdout, stderr) = test_env.jj_cmd_ok(&secondary_path, &["workspace", "update-stale"]);
+        insta::assert_snapshot!(stderr, @r###"
+        Failed to read working copy's current operation; attempting recovery. Error message from read attempt: Object 8d4abed655badb70b1bab62aa87136619dbc3c8015a8ce8dfb7abfeca4e2f36c713d8f84e070a0613907a6cee7e1cc05323fe1205a319b93fe978f11a060c33c of type operation not found
+        Created and checked out recovery commit 76d0126b3e5c
+        "###);
+        insta::assert_snapshot!(stdout, @"");
+    }
+
+    insta::allow_duplicates! {
+        insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r"
+        @  6c051bd1ccd5 default@
+        │ ○  15df8cb57d3f secondary@
+        │ ○  96b31dafdc41
+        ├─╯
+        ○  7c5b25a4fc8f
+        ◆  000000000000
+        ");
+    }
 
     // The sparse patterns should remain
     let stdout = test_env.jj_cmd_success(&secondary_path, &["sparse", "list"]);
-    insta::assert_snapshot!(stdout, @r###"
-    added
-    deleted
-    modified
-    "###);
+    insta::allow_duplicates! {
+        insta::assert_snapshot!(stdout, @r###"
+        added
+        deleted
+        modified
+        "###);
+    }
     let (stdout, stderr) = test_env.jj_cmd_ok(&secondary_path, &["st"]);
-    insta::assert_snapshot!(stderr, @"");
-    insta::assert_snapshot!(stdout, @r###"
-    Working copy changes:
-    A added
-    D deleted
-    M modified
-    Working copy : kmkuslsw b0b40043 (no description set)
-    Parent commit: rzvqmyuk 96b31daf (empty) (no description set)
-    "###);
-    // The modified file should have the same contents it had before (not reset to
-    // the base contents)
-    insta::assert_snapshot!(std::fs::read_to_string(secondary_path.join("modified")).unwrap(), @r###"
-    secondary
-    "###);
+    insta::allow_duplicates! {
+        insta::assert_snapshot!(stderr, @"");
+        insta::assert_snapshot!(stdout, @r###"
+        Working copy changes:
+        A added
+        D deleted
+        M modified
+        Working copy : kmkuslsw 15df8cb5 RECOVERY COMMIT FROM `jj workspace update-stale`
+        Parent commit: rzvqmyuk 96b31daf (empty) (no description set)
+        "###);
+        // The modified file should have the same contents it had before (not reset to
+        // the base contents)
+        insta::assert_snapshot!(std::fs::read_to_string(secondary_path.join("modified")).unwrap(), @r###"
+        secondary
+        "###);
+    }
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&secondary_path, &["evolog"]);
-    insta::assert_snapshot!(stderr, @"");
-    insta::assert_snapshot!(stdout, @r###"
-    @  kmkuslsw test.user@example.com 2001-02-03 08:05:18 secondary@ b0b40043
-    │  (no description set)
-    ○  kmkuslsw hidden test.user@example.com 2001-02-03 08:05:18 62f70695
-       (empty) (no description set)
-    "###);
+    insta::allow_duplicates! {
+        insta::assert_snapshot!(stderr, @"");
+        insta::assert_snapshot!(stdout, @r###"
+        @  kmkuslsw test.user@example.com 2001-02-03 08:05:18 secondary@ 15df8cb5
+        │  RECOVERY COMMIT FROM `jj workspace update-stale`
+        ○  kmkuslsw hidden test.user@example.com 2001-02-03 08:05:18 76d0126b
+           (empty) RECOVERY COMMIT FROM `jj workspace update-stale`
+        "###);
+    }
 }
 
 #[test]
@@ -745,9 +850,7 @@ fn test_workspaces_update_stale_noop() {
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&main_path, &["workspace", "update-stale"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(stderr, @r###"
-    Nothing to do (the working copy is not stale).
-    "###);
+    insta::assert_snapshot!(stderr, @"Attempted recovery, but the working copy is not stale");
 
     let stderr = test_env.jj_cmd_failure(
         &main_path,
@@ -787,7 +890,7 @@ fn test_workspaces_update_stale_snapshot() {
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
     Concurrent modification detected, resolving automatically.
-    Nothing to do (the working copy is not stale).
+    Attempted recovery, but the working copy is not stale
     "###);
 
     insta::assert_snapshot!(get_log_output(&test_env, &secondary_path), @r###"
@@ -934,12 +1037,12 @@ fn test_workspaces_forget_abandon_commits() {
     second: uuqppmxq 57d63245 (empty) (no description set)
     third: uuqppmxq 57d63245 (empty) (no description set)
     "###);
-    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r###"
-    ○  57d63245a308 fourth@ second@ third@
-    │ @  4e8f9d2be039 default@
+    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r"
+    @  4e8f9d2be039 default@
+    │ ○  57d63245a308 fourth@ second@ third@
     ├─╯
     ◆  000000000000
-    "###);
+    ");
 
     // delete the default workspace (should not abandon commit since not empty)
     test_env.jj_cmd_success(&main_path, &["workspace", "forget", "default"]);
@@ -1144,12 +1247,12 @@ fn test_workspaces_rename_workspace() {
     "###);
 
     // Can see the working-copy commit in each workspace in the log output.
-    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r###"
-    ○  57d63245a308 third@
-    │ @  230dd059e1b0 default@
+    insta::assert_snapshot!(get_log_output(&test_env, &main_path), @r"
+    @  230dd059e1b0 default@
+    │ ○  57d63245a308 third@
     ├─╯
     ◆  000000000000
-    "###);
+    ");
     insta::assert_snapshot!(get_log_output(&test_env, &secondary_path), @r###"
     @  57d63245a308 third@
     │ ○  230dd059e1b0 default@

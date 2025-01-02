@@ -16,9 +16,9 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
-use itertools::Itertools;
 use jj_lib::file_util::try_symlink;
 
+use crate::common::to_toml_value;
 use crate::common::TestEnvironment;
 
 /// Set up a repo where the `jj fix` command uses the fake editor with the given
@@ -34,22 +34,18 @@ fn init_with_fake_formatter(args: &[&str]) -> (TestEnvironment, PathBuf, impl Fn
     // make a meaningful difference in coverage. Otherwise, we would have to add
     // dedicated test coverage for the deprecated syntax until it is removed. We use
     // single quotes here to avoid escaping issues when running the test on Windows.
-    test_env.add_config(&format!(
-        r#"fix.tool-command = ['{}']"#,
-        [formatter_path.to_str().unwrap()]
-            .iter()
-            .chain(args)
-            .join(r#"', '"#)
+    test_env.add_config(format!(
+        "fix.tool-command = {}",
+        toml_edit::Value::from_iter(
+            [formatter_path.to_str().unwrap()]
+                .iter()
+                .chain(args)
+                .copied()
+        )
     ));
     (test_env, repo_path, move |snapshot: &str| {
-        // When the test runs on Windows, backslashes in the path complicate things by
-        // changing the double quotes to single quotes in the serialized TOML.
         snapshot.replace(
-            &if cfg!(windows) {
-                format!(r#"'{}'"#, formatter_path.to_str().unwrap())
-            } else {
-                format!(r#""{}""#, formatter_path.to_str().unwrap())
-            },
+            &to_toml_value(formatter_path.to_str().unwrap()).to_string(),
             "<redacted formatter path>",
         )
     })
@@ -65,7 +61,7 @@ fn test_config_no_tools() {
     let stderr = test_env.jj_cmd_failure(&repo_path, &["fix"]);
     insta::assert_snapshot!(stderr, @r###"
     Config error: At least one entry of `fix.tools` or `fix.tool-command` is required.
-    For help, see https://martinvonz.github.io/jj/latest/config/.
+    For help, see https://jj-vcs.github.io/jj/latest/config/.
     "###);
 
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "@"]);
@@ -80,17 +76,16 @@ fn test_config_both_legacy_and_table_tools() {
 
     let formatter_path = assert_cmd::cargo::cargo_bin("fake-formatter");
     assert!(formatter_path.is_file());
-    let escaped_formatter_path = formatter_path.to_str().unwrap().replace('\\', r"\\");
-    test_env.add_config(&format!(
+    let formatter = to_toml_value(formatter_path.to_str().unwrap());
+    test_env.add_config(format!(
         r###"
         [fix]
-        tool-command = ["{formatter}", "--append", "legacy change"]
+        tool-command = [{formatter}, "--append", "legacy change"]
 
         [fix.tools.tool-1]
-        command = ["{formatter}", "--append", "tables change"]
+        command = [{formatter}, "--append", "tables change"]
         patterns = ["tables-file"]
         "###,
-        formatter = escaped_formatter_path.as_str()
     ));
 
     std::fs::write(repo_path.join("legacy-file"), "legacy content\n").unwrap();
@@ -118,18 +113,17 @@ fn test_config_multiple_tools() {
     let repo_path = test_env.env_root().join("repo");
     let formatter_path = assert_cmd::cargo::cargo_bin("fake-formatter");
     assert!(formatter_path.is_file());
-    let escaped_formatter_path = formatter_path.to_str().unwrap().replace('\\', r"\\");
-    test_env.add_config(&format!(
+    let formatter = to_toml_value(formatter_path.to_str().unwrap());
+    test_env.add_config(format!(
         r###"
         [fix.tools.tool-1]
-        command = ["{formatter}", "--uppercase"]
+        command = [{formatter}, "--uppercase"]
         patterns = ["foo"]
 
         [fix.tools.tool-2]
-        command = ["{formatter}", "--lowercase"]
+        command = [{formatter}, "--lowercase"]
         patterns = ["bar"]
         "###,
-        formatter = escaped_formatter_path.as_str()
     ));
 
     std::fs::write(repo_path.join("foo"), "Foo\n").unwrap();
@@ -153,39 +147,40 @@ fn test_config_multiple_tools_with_same_name() {
     let repo_path = test_env.env_root().join("repo");
     let formatter_path = assert_cmd::cargo::cargo_bin("fake-formatter");
     assert!(formatter_path.is_file());
-    let escaped_formatter_path = formatter_path.to_str().unwrap().replace('\\', r"\\");
+    let formatter = to_toml_value(formatter_path.to_str().unwrap());
 
     // Multiple definitions with the same `name` are not allowed, because it is
     // likely to be a mistake, and mistakes are risky when they rewrite files.
-    test_env.add_config(&format!(
+    test_env.add_config(format!(
         r###"
         [fix.tools.my-tool]
-        command = ["{formatter}", "--uppercase"]
+        command = [{formatter}, "--uppercase"]
         patterns = ["foo"]
 
         [fix.tools.my-tool]
-        command = ["{formatter}", "--lowercase"]
+        command = [{formatter}, "--lowercase"]
         patterns = ["bar"]
         "###,
-        formatter = escaped_formatter_path.as_str()
     ));
 
     std::fs::write(repo_path.join("foo"), "Foo\n").unwrap();
     std::fs::write(repo_path.join("bar"), "Bar\n").unwrap();
 
     let stderr = test_env.jj_cmd_failure(&repo_path, &["fix"]);
-    #[cfg(unix)]
-    insta::assert_snapshot!(stderr, @r###"
-    Config error: redefinition of table `fix.tools.my-tool` for key `fix.tools.my-tool` at line 6 column 9 in ../config/config0002.toml
-    For help, see https://martinvonz.github.io/jj/latest/config/.
-    "###);
-    #[cfg(windows)]
-    insta::assert_snapshot!(stderr, @r###"
-    Config error: redefinition of table `fix.tools.my-tool` for key `fix.tools.my-tool` at line 6 column 9 in ..\config\config0002.toml
-    For help, see https://martinvonz.github.io/jj/latest/config/.
-    "###);
+    insta::assert_snapshot!(stderr, @r"
+    Config error: Configuration cannot be parsed as TOML document
+    Caused by: TOML parse error at line 6, column 9
+      |
+    6 |         [fix.tools.my-tool]
+      |         ^
+    invalid table header
+    duplicate key `my-tool` in table `fix.tools`
 
-    test_env.set_config_path("/dev/null".into());
+    Hint: Check the config file: $TEST_ENV/config/config0002.toml
+    For help, see https://jj-vcs.github.io/jj/latest/config/.
+    ");
+
+    test_env.set_config_path("/dev/null");
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "foo", "-r", "@"]);
     insta::assert_snapshot!(content, @"Foo\n");
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "bar", "-r", "@"]);
@@ -199,19 +194,18 @@ fn test_config_tables_overlapping_patterns() {
     let repo_path = test_env.env_root().join("repo");
     let formatter_path = assert_cmd::cargo::cargo_bin("fake-formatter");
     assert!(formatter_path.is_file());
-    let escaped_formatter_path = formatter_path.to_str().unwrap().replace('\\', r"\\");
+    let formatter = to_toml_value(formatter_path.to_str().unwrap());
 
-    test_env.add_config(&format!(
+    test_env.add_config(format!(
         r###"
         [fix.tools.tool-1]
-        command = ["{formatter}", "--append", "tool-1"]
+        command = [{formatter}, "--append", "tool-1"]
         patterns = ["foo", "bar"]
 
         [fix.tools.tool-2]
-        command = ["{formatter}", "--append", "tool-2"]
+        command = [{formatter}, "--append", "tool-2"]
         patterns = ["bar", "baz"]
         "###,
-        formatter = escaped_formatter_path.as_str()
     ));
 
     std::fs::write(repo_path.join("foo"), "foo\n").unwrap();
@@ -256,10 +250,13 @@ fn test_config_tables_all_commands_missing() {
     std::fs::write(repo_path.join("foo"), "foo\n").unwrap();
 
     let stderr = test_env.jj_cmd_failure(&repo_path, &["fix"]);
-    insta::assert_snapshot!(stderr, @r###"
-    Config error: missing field `command`
-    For help, see https://martinvonz.github.io/jj/latest/config/.
-    "###);
+    insta::assert_snapshot!(stderr.replace('\\', "/"), @r"
+    Config error: Invalid type or value for fix.tools.my-tool-missing-command-1
+    Caused by: missing field `command`
+
+    Hint: Check the config file: $TEST_ENV/config/config0002.toml
+    For help, see https://jj-vcs.github.io/jj/latest/config/.
+    ");
 
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "foo", "-r", "@"]);
     insta::assert_snapshot!(content, @"foo\n");
@@ -272,26 +269,28 @@ fn test_config_tables_some_commands_missing() {
     let repo_path = test_env.env_root().join("repo");
     let formatter_path = assert_cmd::cargo::cargo_bin("fake-formatter");
     assert!(formatter_path.is_file());
-    let escaped_formatter_path = formatter_path.to_str().unwrap().replace('\\', r"\\");
-    test_env.add_config(&format!(
+    let formatter = to_toml_value(formatter_path.to_str().unwrap());
+    test_env.add_config(format!(
         r###"
         [fix.tools.tool-1]
-        command = ["{formatter}", "--uppercase"]
+        command = [{formatter}, "--uppercase"]
         patterns = ["foo"]
 
         [fix.tools.my-tool-missing-command]
         patterns = ['bar']
         "###,
-        formatter = escaped_formatter_path.as_str()
     ));
 
     std::fs::write(repo_path.join("foo"), "foo\n").unwrap();
 
     let stderr = test_env.jj_cmd_failure(&repo_path, &["fix"]);
-    insta::assert_snapshot!(stderr, @r###"
-    Config error: missing field `command`
-    For help, see https://martinvonz.github.io/jj/latest/config/.
-    "###);
+    insta::assert_snapshot!(stderr.replace('\\', "/"), @r"
+    Config error: Invalid type or value for fix.tools.my-tool-missing-command
+    Caused by: missing field `command`
+
+    Hint: Check the config file: $TEST_ENV/config/config0002.toml
+    For help, see https://jj-vcs.github.io/jj/latest/config/.
+    ");
 
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "foo", "-r", "@"]);
     insta::assert_snapshot!(content, @"foo\n");
@@ -304,14 +303,13 @@ fn test_config_tables_empty_patterns_list() {
     let repo_path = test_env.env_root().join("repo");
     let formatter_path = assert_cmd::cargo::cargo_bin("fake-formatter");
     assert!(formatter_path.is_file());
-    let escaped_formatter_path = formatter_path.to_str().unwrap().replace('\\', r"\\");
-    test_env.add_config(&format!(
+    let formatter = to_toml_value(formatter_path.to_str().unwrap());
+    test_env.add_config(format!(
         r###"
         [fix.tools.my-tool-empty-patterns]
-        command = ["{formatter}", "--uppercase"]
+        command = [{formatter}, "--uppercase"]
         patterns = []
         "###,
-        formatter = escaped_formatter_path.as_str()
     ));
 
     std::fs::write(repo_path.join("foo"), "foo\n").unwrap();
@@ -334,22 +332,21 @@ fn test_config_filesets() {
     let repo_path = test_env.env_root().join("repo");
     let formatter_path = assert_cmd::cargo::cargo_bin("fake-formatter");
     assert!(formatter_path.is_file());
-    let escaped_formatter_path = formatter_path.to_str().unwrap().replace('\\', r"\\");
-    test_env.add_config(&format!(
+    let formatter = to_toml_value(formatter_path.to_str().unwrap());
+    test_env.add_config(format!(
         r###"
         [fix.tools.my-tool-match-one]
-        command = ["{formatter}", "--uppercase"]
+        command = [{formatter}, "--uppercase"]
         patterns = ['glob:"a*"']
 
         [fix.tools.my-tool-match-two]
-        command = ["{formatter}", "--reverse"]
+        command = [{formatter}, "--reverse"]
         patterns = ['glob:"b*"']
 
         [fix.tools.my-tool-match-none]
-        command = ["{formatter}", "--append", "SHOULD NOT APPEAR"]
+        command = [{formatter}, "--append", "SHOULD NOT APPEAR"]
         patterns = ['glob:"this-doesnt-match-anything-*"']
         "###,
-        formatter = escaped_formatter_path.as_str()
     ));
 
     std::fs::write(repo_path.join("a1"), "a1\n").unwrap();
@@ -373,14 +370,13 @@ fn test_relative_paths() {
     let repo_path = test_env.env_root().join("repo");
     let formatter_path = assert_cmd::cargo::cargo_bin("fake-formatter");
     assert!(formatter_path.is_file());
-    let escaped_formatter_path = formatter_path.to_str().unwrap().replace('\\', r"\\");
-    test_env.add_config(&format!(
+    let formatter = to_toml_value(formatter_path.to_str().unwrap());
+    test_env.add_config(format!(
         r###"
         [fix.tools.tool]
-        command = ["{formatter}", "--stdout", "Fixed!"]
+        command = [{formatter}, "--stdout", "Fixed!"]
         patterns = ['glob:"foo*"']
         "###,
-        formatter = escaped_formatter_path.as_str()
     ));
 
     std::fs::create_dir(repo_path.join("dir")).unwrap();
@@ -424,7 +420,7 @@ fn test_fix_empty_commit() {
     let (test_env, repo_path, redact) = init_with_fake_formatter(&["--uppercase"]);
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix", "-s", "@"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -433,7 +429,7 @@ fn test_fix_empty_commit() {
                 
     Fixed 0 commits of 1 checked.
     Nothing changed.
-    "###);
+    "#);
 }
 
 #[test]
@@ -445,7 +441,7 @@ fn test_fix_leaf_commit() {
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix", "-s", "@"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -456,7 +452,7 @@ fn test_fix_leaf_commit() {
     Working copy now at: rlvkpnrz 85ce8924 (no description set)
     Parent commit      : qpvuntsm b2ca2bc5 (no description set)
     Added 0 files, modified 1 files, removed 0 files
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "@-"]);
     insta::assert_snapshot!(content, @"unaffected");
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "@"]);
@@ -478,7 +474,7 @@ fn test_fix_parent_commit() {
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix", "-s", "parent"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -489,7 +485,7 @@ fn test_fix_parent_commit() {
     Working copy now at: mzvwutvl d30c8ae2 child2 | (no description set)
     Parent commit      : qpvuntsm 70a4dae2 parent | (no description set)
     Added 0 files, modified 1 files, removed 0 files
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "parent"]);
     insta::assert_snapshot!(content, @"PARENT");
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "child1"]);
@@ -512,7 +508,7 @@ fn test_fix_sibling_commit() {
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix", "-s", "child1"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -520,7 +516,7 @@ fn test_fix_sibling_commit() {
                 patterns = ["all()"]
                 
     Fixed 1 commits of 1 checked.
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "parent"]);
     insta::assert_snapshot!(content, @"parent");
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "child1"]);
@@ -557,7 +553,7 @@ fn test_default_revset() {
     test_env.add_config(r#"revset-aliases."immutable_heads()" = "trunk2""#);
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -568,7 +564,7 @@ fn test_default_revset() {
     Working copy now at: yostqsxw dabc47b2 bar2 | (no description set)
     Parent commit      : yqosqzyt 984b5924 bar1 | (no description set)
     Added 0 files, modified 1 files, removed 0 files
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "trunk1"]);
     insta::assert_snapshot!(content, @"trunk1");
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "trunk2"]);
@@ -600,7 +596,7 @@ fn test_custom_default_revset() {
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -608,7 +604,7 @@ fn test_custom_default_revset() {
                 patterns = ["all()"]
                 
     Fixed 1 commits of 1 checked.
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "foo"]);
     insta::assert_snapshot!(content, @"foo");
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "bar"]);
@@ -626,7 +622,7 @@ fn test_fix_immutable_commit() {
     test_env.add_config(r#"revset-aliases."immutable_heads()" = "immutable""#);
 
     let stderr = test_env.jj_cmd_failure(&repo_path, &["fix", "-s", "immutable"]);
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -634,8 +630,9 @@ fn test_fix_immutable_commit() {
                 patterns = ["all()"]
                 
     Error: Commit e4b41a3ce243 is immutable
+    Hint: Could not modify commit: qpvuntsm e4b41a3c immutable | (no description set)
     Hint: Pass `--ignore-immutable` or configure the set of immutable commits via `revset-aliases.immutable_heads()`.
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "immutable"]);
     insta::assert_snapshot!(content, @"immutable");
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "mutable"]);
@@ -649,7 +646,7 @@ fn test_fix_empty_file() {
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix", "-s", "@"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -658,7 +655,7 @@ fn test_fix_empty_file() {
                 
     Fixed 0 commits of 1 checked.
     Nothing changed.
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "@"]);
     insta::assert_snapshot!(content, @"");
 }
@@ -671,7 +668,7 @@ fn test_fix_some_paths() {
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix", "-s", "@", "file1"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -682,7 +679,7 @@ fn test_fix_some_paths() {
     Working copy now at: qpvuntsm 54a90d2b (no description set)
     Parent commit      : zzzzzzzz 00000000 (empty) (no description set)
     Added 0 files, modified 1 files, removed 0 files
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file1"]);
     insta::assert_snapshot!(content, @r###"
     FOO
@@ -698,7 +695,7 @@ fn test_fix_cyclic() {
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -709,13 +706,13 @@ fn test_fix_cyclic() {
     Working copy now at: qpvuntsm bf5e6a5a (no description set)
     Parent commit      : zzzzzzzz 00000000 (empty) (no description set)
     Added 0 files, modified 1 files, removed 0 files
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "@"]);
     insta::assert_snapshot!(content, @"tnetnoc\n");
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -726,7 +723,7 @@ fn test_fix_cyclic() {
     Working copy now at: qpvuntsm 0e2d20d6 (no description set)
     Parent commit      : zzzzzzzz 00000000 (empty) (no description set)
     Added 0 files, modified 1 files, removed 0 files
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "@"]);
     insta::assert_snapshot!(content, @"content\n");
 }
@@ -755,7 +752,7 @@ fn test_deduplication() {
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix", "-s", "a"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -766,7 +763,7 @@ fn test_deduplication() {
     Working copy now at: yqosqzyt cf770245 d | (no description set)
     Parent commit      : mzvwutvl 370615a5 c | (empty) (no description set)
     Added 0 files, modified 1 files, removed 0 files
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "a"]);
     insta::assert_snapshot!(content, @"FOO\n");
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "b"]);
@@ -801,7 +798,7 @@ fn test_executed_but_nothing_changed() {
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix", "-s", "@"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -810,7 +807,7 @@ fn test_executed_but_nothing_changed() {
                 
     Fixed 0 commits of 1 checked.
     Nothing changed.
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "@"]);
     insta::assert_snapshot!(content, @"content\n");
     let copy_content = std::fs::read_to_string(repo_path.join("file-copy").as_os_str()).unwrap();
@@ -824,7 +821,7 @@ fn test_failure() {
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix", "-s", "@"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -833,7 +830,7 @@ fn test_failure() {
                 
     Fixed 0 commits of 1 checked.
     Nothing changed.
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "@"]);
     insta::assert_snapshot!(content, @"content");
 }
@@ -848,7 +845,7 @@ fn test_stderr_success() {
     // of passing it through directly.
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix", "-s", "@"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -859,7 +856,7 @@ fn test_stderr_success() {
     Working copy now at: qpvuntsm 487808ba (no description set)
     Parent commit      : zzzzzzzz 00000000 (empty) (no description set)
     Added 0 files, modified 1 files, removed 0 files
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "@"]);
     insta::assert_snapshot!(content, @"new content");
 }
@@ -872,7 +869,7 @@ fn test_stderr_failure() {
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix", "-s", "@"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -881,7 +878,7 @@ fn test_stderr_failure() {
                 
     errorFixed 0 commits of 1 checked.
     Nothing changed.
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "@"]);
     insta::assert_snapshot!(content, @"old content");
 }
@@ -918,7 +915,7 @@ fn test_fix_file_types() {
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix", "-s", "@"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -929,7 +926,7 @@ fn test_fix_file_types() {
     Working copy now at: qpvuntsm 6836a9e4 (no description set)
     Parent commit      : zzzzzzzz 00000000 (empty) (no description set)
     Added 0 files, modified 1 files, removed 0 files
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "@"]);
     insta::assert_snapshot!(content, @"CONTENT");
 }
@@ -946,7 +943,7 @@ fn test_fix_executable() {
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix", "-s", "@"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -957,7 +954,7 @@ fn test_fix_executable() {
     Working copy now at: qpvuntsm fee78e99 (no description set)
     Parent commit      : zzzzzzzz 00000000 (empty) (no description set)
     Added 0 files, modified 1 files, removed 0 files
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "@"]);
     insta::assert_snapshot!(content, @"CONTENT");
     let executable = std::fs::metadata(&path).unwrap().permissions().mode() & 0o111;
@@ -980,7 +977,7 @@ fn test_fix_trivial_merge_commit() {
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix", "-s", "@"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -989,7 +986,7 @@ fn test_fix_trivial_merge_commit() {
                 
     Fixed 0 commits of 1 checked.
     Nothing changed.
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file_a", "-r", "@"]);
     insta::assert_snapshot!(content, @"content a");
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file_b", "-r", "@"]);
@@ -1018,7 +1015,7 @@ fn test_fix_adding_merge_commit() {
 
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix", "-s", "@"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -1030,7 +1027,7 @@ fn test_fix_adding_merge_commit() {
     Parent commit      : qpvuntsm 6e64e7a7 a | (no description set)
     Parent commit      : kkmpptxz c536f264 b | (no description set)
     Added 0 files, modified 4 files, removed 0 files
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file_a", "-r", "@"]);
     insta::assert_snapshot!(content, @"CHANGE A");
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file_b", "-r", "@"]);
@@ -1055,7 +1052,7 @@ fn test_fix_both_sides_of_conflict() {
     // fixed if we didn't fix the parents also.
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix", "-s", "a", "-s", "b"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -1063,13 +1060,13 @@ fn test_fix_both_sides_of_conflict() {
                 patterns = ["all()"]
                 
     Fixed 3 commits of 3 checked.
-    Working copy now at: mzvwutvl 88866235 (conflict) (empty) (no description set)
+    Working copy now at: mzvwutvl a55c6ec2 (conflict) (empty) (no description set)
     Parent commit      : qpvuntsm 8e8aad69 a | (no description set)
     Parent commit      : kkmpptxz 91f9b284 b | (no description set)
     Added 0 files, modified 1 files, removed 0 files
     There are unresolved conflicts at these paths:
     file    2-sided conflict
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "a"]);
     insta::assert_snapshot!(content, @r###"
     CONTENT A
@@ -1105,7 +1102,7 @@ fn test_fix_resolve_conflict() {
     // fixed if we didn't fix the parents also.
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["fix", "-s", "a", "-s", "b"]);
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(redact(&stderr), @r###"
+    insta::assert_snapshot!(redact(&stderr), @r#"
     Warning: The `fix.tool-command` config option is deprecated and will be removed in a future version.
     Hint: Replace it with the following:
                 [fix.tools.legacy-tool-command]
@@ -1117,7 +1114,7 @@ fn test_fix_resolve_conflict() {
     Parent commit      : qpvuntsm dd2721f1 a | (no description set)
     Parent commit      : kkmpptxz 07c27a8e b | (no description set)
     Added 0 files, modified 1 files, removed 0 files
-    "###);
+    "#);
     let content = test_env.jj_cmd_success(&repo_path, &["file", "show", "file", "-r", "@"]);
     insta::assert_snapshot!(content, @r###"
     CONTENT
@@ -1131,7 +1128,7 @@ fn test_all_files() {
     let repo_path = test_env.env_root().join("repo");
     let formatter_path = assert_cmd::cargo::cargo_bin("fake-formatter");
     assert!(formatter_path.is_file());
-    let escaped_formatter_path = formatter_path.to_str().unwrap().replace('\\', r"\\");
+    let formatter = to_toml_value(formatter_path.to_str().unwrap());
 
     // Consider a few cases:
     // File A:     in patterns,     changed in child
@@ -1140,13 +1137,12 @@ fn test_all_files() {
     // File D: NOT in patterns,     changed in child
     // Some files will be in subdirectories to make sure we're covering that aspect
     // of matching.
-    test_env.add_config(&format!(
+    test_env.add_config(format!(
         r###"
         [fix.tools.tool]
-        command = ["{formatter}", "--append", "fixed"]
+        command = [{formatter}, "--append", "fixed"]
         patterns = ["a/a", "b/b"]
         "###,
-        formatter = escaped_formatter_path.as_str()
     ));
 
     std::fs::create_dir(repo_path.join("a")).unwrap();

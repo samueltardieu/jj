@@ -107,10 +107,10 @@ reused between `jj run` invocations. They will also be reused within `jj run`
 invocation if there are more commits to run on than there are parallel jobs.
 
 We will leave ignored files in the temporary directory between runs. That
-enables incremental builds (e.g by letting cargo reuse its `target/` directory).
-However, it also means that runs potentially become less reproducible. We will
-provide a flag for removing ignored files from the temporary working copies to
-address that.
+enables incremental builds (e.g. by letting cargo reuse its `target/`
+directory). However, it also means that runs potentially become less
+reproducible. We will provide a flag for removing ignored files from the
+temporary working copies to address that.
 
 Another problem with leaving ignored files in the temporary directories is that
 they take up space. That is especially problematic in the case of cargo (the
@@ -135,7 +135,7 @@ assigned working copy. Let's say the user runs `jj run` on just commits A and
 B, where B's parent is A. Any changes made on top of A would be squashed into
 A, forming A'. Similarly B' would be formed by squasing it into B. We can then
 either do a normal rebase of B' onto A', or we can simply update its parent to
-A'. The former is useful, e.g when the subprocess only makes a partial update
+A'. The former is useful, e.g. when the subprocess only makes a partial update
 of the tree based on the parent commit. In addition to these two modes, we may
 want to have an option to ignore any changes made in the subprocess's working
 copy.
@@ -263,10 +263,10 @@ user and incrementally updating the output of `jj st`.
 
 
 [git-branchless]: https://github.com/arxanas/git-branchless
-[issue]: https://github.com/martinvonz/jj/issues/963
+[issue]: https://github.com/jj-vcs/jj/issues/963
 [fix-src]: https://repo.mercurial-scm.org/hg/file/tip/hgext/fix.py
 [hooks]: https://discord.com/channels/968932220549103686/969829516539228222/1047958933161119795
-[OpHeadsStore]: https://github.com/martinvonz/jj/blob/main/lib/src/op_heads_store.rs
-[pre-commit]: https://github.com/martinvonz/jj/issues/405
-[Treestate]: https://github.com/martinvonz/jj/blob/af85f552b676d66ed0e9ae0d401cd0c4ffbbeb21/lib/src/working_copy.rs#L117
-[Workspace]: https://github.com/martinvonz/jj/blob/af85f552b676d66ed0e9ae0d401cd0c4ffbbeb21/lib/src/workspace.rs#L54
+[OpHeadsStore]: https://github.com/jj-vcs/jj/blob/main/lib/src/op_heads_store.rs
+[pre-commit]: https://github.com/jj-vcs/jj/issues/405
+[Treestate]: https://github.com/jj-vcs/jj/blob/af85f552b676d66ed0e9ae0d401cd0c4ffbbeb21/lib/src/working_copy.rs#L117
+[Workspace]: https://github.com/jj-vcs/jj/blob/af85f552b676d66ed0e9ae0d401cd0c4ffbbeb21/lib/src/workspace.rs#L54

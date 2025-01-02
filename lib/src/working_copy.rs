@@ -16,25 +16,36 @@
 //! default local-disk implementation.
 
 use std::any::Any;
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use itertools::Itertools;
 use thiserror::Error;
+use tracing::instrument;
 
 use crate::backend::BackendError;
 use crate::backend::MergedTreeId;
 use crate::commit::Commit;
+use crate::conflicts::ConflictMarkerStyle;
+use crate::dag_walk;
 use crate::fsmonitor::FsmonitorSettings;
 use crate::gitignore::GitIgnoreError;
 use crate::gitignore::GitIgnoreFile;
 use crate::matchers::EverythingMatcher;
 use crate::matchers::Matcher;
+use crate::op_heads_store::OpHeadsStoreError;
+use crate::op_store::OpStoreError;
 use crate::op_store::OperationId;
 use crate::op_store::WorkspaceId;
+use crate::operation::Operation;
+use crate::repo::ReadonlyRepo;
+use crate::repo::Repo;
+use crate::repo::RewriteRootCommit;
+use crate::repo_path::InvalidRepoPathError;
 use crate::repo_path::RepoPath;
 use crate::repo_path::RepoPathBuf;
-use crate::settings::HumanByteSize;
 use crate::store::Store;
 
 /// The trait all working-copy implementations must implement.
@@ -101,11 +112,18 @@ pub trait LockedWorkingCopy {
     /// The tree at the time the lock was taken
     fn old_tree_id(&self) -> &MergedTreeId;
 
-    /// Snapshot the working copy and return the tree id.
-    fn snapshot(&mut self, options: &SnapshotOptions) -> Result<MergedTreeId, SnapshotError>;
+    /// Snapshot the working copy. Returns the tree id and stats.
+    fn snapshot(
+        &mut self,
+        options: &SnapshotOptions,
+    ) -> Result<(MergedTreeId, SnapshotStats), SnapshotError>;
 
     /// Check out the specified commit in the working copy.
-    fn check_out(&mut self, commit: &Commit) -> Result<CheckoutStats, CheckoutError>;
+    fn check_out(
+        &mut self,
+        commit: &Commit,
+        options: &CheckoutOptions,
+    ) -> Result<CheckoutStats, CheckoutError>;
 
     /// Update the workspace name.
     fn rename_workspace(&mut self, new_workspace_name: WorkspaceId);
@@ -129,6 +147,7 @@ pub trait LockedWorkingCopy {
     fn set_sparse_patterns(
         &mut self,
         new_sparse_patterns: Vec<RepoPathBuf>,
+        options: &CheckoutOptions,
     ) -> Result<CheckoutStats, CheckoutError>;
 
     /// Finish the modifications to the working copy by writing the updated
@@ -142,6 +161,9 @@ pub trait LockedWorkingCopy {
 /// An error while snapshotting the working copy.
 #[derive(Debug, Error)]
 pub enum SnapshotError {
+    /// A tracked path contained invalid component such as `..`.
+    #[error(transparent)]
+    InvalidRepoPath(#[from] InvalidRepoPathError),
     /// A path in the working copy was not valid UTF-8.
     #[error("Working copy path {} is not valid UTF-8", path.to_string_lossy())]
     InvalidUtf8Path {
@@ -158,17 +180,6 @@ pub enum SnapshotError {
     /// Reading or writing from the commit backend failed.
     #[error(transparent)]
     BackendError(#[from] BackendError),
-    /// A file was larger than the specified maximum file size for new
-    /// (previously untracked) files.
-    #[error("New file {path} of size ~{size} exceeds snapshot.max-new-file-size ({max_size})")]
-    NewFileTooLarge {
-        /// The path of the large file.
-        path: PathBuf,
-        /// The size of the large file.
-        size: HumanByteSize,
-        /// The maximum allowed size.
-        max_size: HumanByteSize,
-    },
     /// Checking path with ignore patterns failed.
     #[error(transparent)]
     GitIgnoreError(#[from] GitIgnoreError),
@@ -208,6 +219,8 @@ pub struct SnapshotOptions<'a> {
     /// (depending on implementation)
     /// return `SnapshotError::NewFileTooLarge`.
     pub max_new_file_size: u64,
+    /// Expected conflict marker style for checking for changed files.
+    pub conflict_marker_style: ConflictMarkerStyle,
 }
 
 impl SnapshotOptions<'_> {
@@ -219,12 +232,48 @@ impl SnapshotOptions<'_> {
             progress: None,
             start_tracking_matcher: &EverythingMatcher,
             max_new_file_size: u64::MAX,
+            conflict_marker_style: ConflictMarkerStyle::default(),
         }
     }
 }
 
 /// A callback for getting progress updates.
 pub type SnapshotProgress<'a> = dyn Fn(&RepoPath) + 'a + Sync;
+
+/// Stats about a snapshot operation on a working copy.
+#[derive(Clone, Debug, Default)]
+pub struct SnapshotStats {
+    /// List of new (previously untracked) files which are still untracked.
+    pub untracked_paths: BTreeMap<RepoPathBuf, UntrackedReason>,
+}
+
+/// Reason why the new path isn't tracked.
+#[derive(Clone, Debug)]
+pub enum UntrackedReason {
+    /// File was larger than the specified maximum file size.
+    FileTooLarge {
+        /// Actual size of the large file.
+        size: u64,
+        /// Maximum allowed size.
+        max_size: u64,
+    },
+}
+
+/// Options used when checking out a tree in the working copy.
+#[derive(Clone)]
+pub struct CheckoutOptions {
+    /// Conflict marker style to use when materializing files
+    pub conflict_marker_style: ConflictMarkerStyle,
+}
+
+impl CheckoutOptions {
+    /// Create an instance for use in tests.
+    pub fn empty_for_test() -> Self {
+        CheckoutOptions {
+            conflict_marker_style: ConflictMarkerStyle::default(),
+        }
+    }
+}
 
 /// Stats about a checkout operation on a working copy. All "files" mentioned
 /// below may also be symlinks or materialized conflicts.
@@ -257,6 +306,17 @@ pub enum CheckoutError {
     /// running (after the working copy was read by the current process).
     #[error("Concurrent checkout")]
     ConcurrentCheckout,
+    /// Path in the commit contained invalid component such as `..`.
+    #[error(transparent)]
+    InvalidRepoPath(#[from] InvalidRepoPathError),
+    /// Path contained reserved name which cannot be checked out to disk.
+    #[error("Reserved path component {name} in {path}")]
+    ReservedPathComponent {
+        /// The file or directory path.
+        path: PathBuf,
+        /// The reserved path component.
+        name: &'static str,
+    },
     /// Reading or writing from the commit backend failed.
     #[error("Internal backend error")]
     InternalBackendError(#[from] BackendError),
@@ -293,6 +353,106 @@ pub enum ResetError {
         #[source]
         err: Box<dyn std::error::Error + Send + Sync>,
     },
+}
+
+/// Whether the working copy is stale or not.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkingCopyFreshness {
+    /// The working copy isn't stale, and no need to reload the repo.
+    Fresh,
+    /// The working copy was updated since we loaded the repo. The repo must be
+    /// reloaded at the working copy's operation.
+    Updated(Box<Operation>),
+    /// The working copy is behind the latest operation.
+    WorkingCopyStale,
+    /// The working copy is a sibling of the latest operation.
+    SiblingOperation,
+}
+
+impl WorkingCopyFreshness {
+    /// Determine the freshness of the provided working copy relative to the
+    /// target commit.
+    #[instrument(skip_all)]
+    pub fn check_stale(
+        locked_wc: &dyn LockedWorkingCopy,
+        wc_commit: &Commit,
+        repo: &ReadonlyRepo,
+    ) -> Result<Self, OpStoreError> {
+        // Check if the working copy's tree matches the repo's view
+        let wc_tree_id = locked_wc.old_tree_id();
+        if wc_commit.tree_id() == wc_tree_id {
+            // The working copy isn't stale, and no need to reload the repo.
+            Ok(Self::Fresh)
+        } else {
+            let wc_operation = repo.loader().load_operation(locked_wc.old_operation_id())?;
+            let repo_operation = repo.operation();
+            let ancestor_op = dag_walk::closest_common_node_ok(
+                [Ok(wc_operation.clone())],
+                [Ok(repo_operation.clone())],
+                |op: &Operation| op.id().clone(),
+                |op: &Operation| op.parents().collect_vec(),
+            )?
+            .expect("unrelated operations");
+            if ancestor_op.id() == repo_operation.id() {
+                // The working copy was updated since we loaded the repo. The repo must be
+                // reloaded at the working copy's operation.
+                Ok(Self::Updated(Box::new(wc_operation)))
+            } else if ancestor_op.id() == wc_operation.id() {
+                // The working copy was not updated when some repo operation committed,
+                // meaning that it's stale compared to the repo view.
+                Ok(Self::WorkingCopyStale)
+            } else {
+                Ok(Self::SiblingOperation)
+            }
+        }
+    }
+}
+
+/// An error while recovering a stale working copy.
+#[derive(Debug, Error)]
+pub enum RecoverWorkspaceError {
+    /// Backend error.
+    #[error(transparent)]
+    Backend(#[from] BackendError),
+    /// Error during transaction.
+    #[error(transparent)]
+    OpHeadsStore(#[from] OpHeadsStoreError),
+    /// Error during checkout.
+    #[error(transparent)]
+    Reset(#[from] ResetError),
+    /// Checkout attempted to modify the root commit.
+    #[error(transparent)]
+    RewriteRootCommit(#[from] RewriteRootCommit),
+    /// Working copy commit is missing.
+    #[error("\"{0:?}\" doesn't have a working-copy commit")]
+    WorkspaceMissingWorkingCopy(WorkspaceId),
+}
+
+/// Recover this workspace to its last known checkout.
+pub fn create_and_check_out_recovery_commit(
+    locked_wc: &mut dyn LockedWorkingCopy,
+    repo: &Arc<ReadonlyRepo>,
+    workspace_id: WorkspaceId,
+    description: &str,
+) -> Result<(Arc<ReadonlyRepo>, Commit), RecoverWorkspaceError> {
+    let mut tx = repo.start_transaction();
+    let repo_mut = tx.repo_mut();
+
+    let commit_id = repo
+        .view()
+        .get_wc_commit_id(&workspace_id)
+        .ok_or_else(|| RecoverWorkspaceError::WorkspaceMissingWorkingCopy(workspace_id.clone()))?;
+    let commit = repo.store().get_commit(commit_id)?;
+    let new_commit = repo_mut
+        .new_commit(vec![commit_id.clone()], commit.tree_id().clone())
+        .set_description(description)
+        .write()?;
+    repo_mut.set_wc_commit(workspace_id, new_commit.id().clone())?;
+
+    let repo = tx.commit("recovery commit")?;
+    locked_wc.recover(&new_commit)?;
+
+    Ok((repo, new_commit))
 }
 
 /// An error while reading the working copy state.

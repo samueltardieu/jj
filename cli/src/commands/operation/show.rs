@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use clap_complete::ArgValueCandidates;
 use itertools::Itertools;
 
 use super::diff::show_op_diff;
@@ -19,6 +20,7 @@ use crate::cli_util::CommandHelper;
 use crate::cli_util::LogContentFormat;
 use crate::command_error::CommandError;
 use crate::commit_templater::CommitTemplateLanguage;
+use crate::complete;
 use crate::diff_util::diff_formats_for_log;
 use crate::diff_util::DiffFormatArgs;
 use crate::diff_util::DiffRenderer;
@@ -29,7 +31,7 @@ use crate::ui::Ui;
 #[derive(clap::Args, Clone, Debug)]
 pub struct OperationShowArgs {
     /// Show repository changes in this operation, compared to its parent(s)
-    #[arg(default_value = "@")]
+    #[arg(default_value = "@", add = ArgValueCandidates::new(complete::operations))]
     operation: String,
     /// Don't show the graph, show a flat list of modified changes
     #[arg(long)]
@@ -55,17 +57,14 @@ pub fn cmd_op_show(
     let repo_loader = workspace_command.workspace().repo_loader();
     let op = workspace_command.resolve_single_op(&args.operation)?;
     let parents: Vec<_> = op.parents().try_collect()?;
-    let parent_op = repo_loader.merge_operations(command.settings(), parents, None)?;
+    let parent_op = repo_loader.merge_operations(parents, None)?;
     let parent_repo = repo_loader.load_at(&parent_op)?;
     let repo = repo_loader.load_at(&op)?;
 
     let id_prefix_context = workspace_env.new_id_prefix_context();
     let commit_summary_template = {
         let language = workspace_env.commit_template_language(repo.as_ref(), &id_prefix_context);
-        let text = command
-            .settings()
-            .config()
-            .get_string("templates.commit_summary")?;
+        let text = command.settings().get_string("templates.commit_summary")?;
         workspace_env.parse_template(ui, &language, &text, CommitTemplateLanguage::wrap_commit)?
     };
 
@@ -74,12 +73,20 @@ pub fn cmd_op_show(
     let diff_renderer = {
         let formats = diff_formats_for_log(command.settings(), &args.diff_format, args.patch)?;
         let path_converter = workspace_env.path_converter();
-        (!formats.is_empty()).then(|| DiffRenderer::new(repo.as_ref(), path_converter, formats))
+        let conflict_marker_style = workspace_env.conflict_marker_style();
+        (!formats.is_empty()).then(|| {
+            DiffRenderer::new(
+                repo.as_ref(),
+                path_converter,
+                conflict_marker_style,
+                formats,
+            )
+        })
     };
 
     // TODO: Should we make this customizable via clap arg?
     let template = {
-        let text = command.settings().config().get_string("templates.op_log")?;
+        let text = command.settings().get_string("templates.op_log")?;
         workspace_command
             .parse_operation_template(ui, &text)?
             .labeled("operation")

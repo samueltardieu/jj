@@ -14,6 +14,8 @@
 
 use std::collections::HashSet;
 
+use clap_complete::ArgValueCandidates;
+use itertools::Itertools;
 use jj_lib::git;
 use jj_lib::revset::RevsetExpression;
 use jj_lib::str_util::StringPattern;
@@ -23,6 +25,7 @@ use crate::cli_util::RevisionArg;
 use crate::command_error::CommandError;
 use crate::commit_templater::CommitTemplateLanguage;
 use crate::commit_templater::RefName;
+use crate::complete;
 use crate::ui::Ui;
 
 /// List bookmarks and their targets
@@ -34,13 +37,31 @@ use crate::ui::Ui;
 /// "+".
 ///
 /// For information about bookmarks, see
-/// https://martinvonz.github.io/jj/docs/bookmarks.md.
+/// https://jj-vcs.github.io/jj/latest/bookmarks/.
 #[derive(clap::Args, Clone, Debug)]
 pub struct BookmarkListArgs {
     /// Show all tracking and non-tracking remote bookmarks including the ones
     /// whose targets are synchronized with the local bookmarks
     #[arg(long, short, alias = "all")]
     all_remotes: bool,
+
+    /// Show all tracking and non-tracking remote bookmarks belonging
+    /// to this remote
+    ///
+    /// Can be combined with `--tracked` or `--conflicted` to filter the
+    /// bookmarks shown (can be repeated.)
+    ///
+    /// By default, the specified remote name matches exactly. Use `glob:`
+    /// prefix to select remotes by wildcard pattern. For details, see
+    /// https://jj-vcs.github.io/jj/latest/revsets/#string-patterns.
+    #[arg(
+        long = "remote",
+        value_name = "REMOTE",
+        conflicts_with_all = ["all_remotes"],
+        value_parser = StringPattern::parse,
+        add = ArgValueCandidates::new(complete::git_remotes),
+    )]
+    remotes: Option<Vec<StringPattern>>,
 
     /// Show remote tracked bookmarks only. Omits local Git-tracking bookmarks
     /// by default
@@ -55,22 +76,22 @@ pub struct BookmarkListArgs {
     ///
     /// By default, the specified name matches exactly. Use `glob:` prefix to
     /// select bookmarks by wildcard pattern. For details, see
-    /// https://martinvonz.github.io/jj/docs/revsets.md#string-patterns.
-    #[arg(value_parser = StringPattern::parse)]
-    names: Vec<StringPattern>,
+    /// https://jj-vcs.github.io/jj/latest/revsets/#string-patterns.
+    #[arg(value_parser = StringPattern::parse, add = ArgValueCandidates::new(complete::bookmarks))]
+    names: Option<Vec<StringPattern>>,
 
     /// Show bookmarks whose local targets are in the given revisions
     ///
     /// Note that `-r deleted_bookmark` will not work since `deleted_bookmark`
     /// wouldn't have a local target.
-    #[arg(long, short)]
-    revisions: Vec<RevisionArg>,
+    #[arg(long, short, value_name = "REVSETS")]
+    revisions: Option<Vec<RevisionArg>>,
 
     /// Render each bookmark using the given template
     ///
     /// All 0-argument methods of the `RefName` type are available as keywords.
     ///
-    /// For the syntax, see https://martinvonz.github.io/jj/latest/docs/templates.md
+    /// For the syntax, see https://jj-vcs.github.io/jj/latest/templates/
     #[arg(long, short = 'T')]
     template: Option<String>,
 }
@@ -85,22 +106,23 @@ pub fn cmd_bookmark_list(
     let view = repo.view();
 
     // Like cmd_git_push(), names and revisions are OR-ed.
-    let bookmark_names_to_list = if !args.names.is_empty() || !args.revisions.is_empty() {
+    let bookmark_names_to_list = if args.names.is_some() || args.revisions.is_some() {
         let mut bookmark_names: HashSet<&str> = HashSet::new();
-        if !args.names.is_empty() {
+        if let Some(patterns) = &args.names {
             bookmark_names.extend(
                 view.bookmarks()
-                    .filter(|&(name, _)| args.names.iter().any(|pattern| pattern.matches(name)))
+                    .filter(|&(name, _)| patterns.iter().any(|pattern| pattern.matches(name)))
                     .map(|(name, _)| name),
             );
         }
-        if !args.revisions.is_empty() {
+        if let Some(revisions) = &args.revisions {
             // Match against local targets only, which is consistent with "jj git push".
-            let mut expression = workspace_command.parse_union_revsets(ui, &args.revisions)?;
+            let mut expression = workspace_command.parse_union_revsets(ui, revisions)?;
             // Intersects with the set of local bookmark targets to minimize the lookup
             // space.
             expression.intersect_with(&RevsetExpression::bookmarks(StringPattern::everything()));
-            let filtered_targets: HashSet<_> = expression.evaluate_to_commit_ids()?.collect();
+            let filtered_targets: HashSet<_> =
+                expression.evaluate_to_commit_ids()?.try_collect()?;
             bookmark_names.extend(
                 view.local_bookmarks()
                     .filter(|(_, target)| {
@@ -118,7 +140,7 @@ pub fn cmd_bookmark_list(
         let language = workspace_command.commit_template_language();
         let text = match &args.template {
             Some(value) => value.to_owned(),
-            None => command.settings().config().get("templates.bookmark_list")?,
+            None => command.settings().get("templates.bookmark_list")?,
         };
         workspace_command
             .parse_template(ui, &language, &text, CommitTemplateLanguage::wrap_ref_name)?
@@ -142,16 +164,22 @@ pub fn cmd_bookmark_list(
         let (mut tracking_remote_refs, untracked_remote_refs) = remote_refs
             .iter()
             .copied()
+            .filter(|&(remote_name, _)| {
+                args.remotes.as_ref().map_or(true, |patterns| {
+                    patterns.iter().any(|pattern| pattern.matches(remote_name))
+                })
+            })
             .partition::<Vec<_>, _>(|&(_, remote_ref)| remote_ref.is_tracking());
 
         if args.tracked {
             tracking_remote_refs
                 .retain(|&(remote, _)| remote != git::REMOTE_NAME_FOR_LOCAL_GIT_REPO);
-        } else if !args.all_remotes {
+        } else if !args.all_remotes && args.remotes.is_none() {
             tracking_remote_refs.retain(|&(_, remote_ref)| remote_ref.target != *local_target);
         }
 
-        if !args.tracked && local_target.is_present() || !tracking_remote_refs.is_empty() {
+        let include_local_only = !args.tracked && args.remotes.is_none();
+        if include_local_only && local_target.is_present() || !tracking_remote_refs.is_empty() {
             let ref_name = RefName::local(
                 name,
                 local_target.clone(),
@@ -172,7 +200,7 @@ pub fn cmd_bookmark_list(
                 .any(|&(remote, _)| remote != git::REMOTE_NAME_FOR_LOCAL_GIT_REPO);
         }
 
-        if args.all_remotes {
+        if !args.tracked && (args.all_remotes || args.remotes.is_some()) {
             for &(remote, remote_ref) in &untracked_remote_refs {
                 let ref_name = RefName::remote_only(name, remote, remote_ref.target.clone());
                 template.format(&ref_name, formatter.as_mut())?;

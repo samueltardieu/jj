@@ -16,6 +16,7 @@ use itertools::Itertools;
 use jj_lib::backend::TreeValue;
 use jj_lib::repo::Repo;
 use jj_lib::repo_path::RepoPath;
+use jj_lib::repo_path::RepoPathBuf;
 use jj_lib::repo_path::RepoPathComponent;
 use jj_lib::rewrite::rebase_commit;
 use jj_lib::tree::merge_trees;
@@ -65,7 +66,7 @@ fn test_same_type() {
             }
         }
         let tree_id = tree_builder.write_tree().unwrap();
-        store.get_tree(RepoPath::root(), &tree_id).unwrap()
+        store.get_tree(RepoPathBuf::root(), &tree_id).unwrap()
     };
 
     let base_tree = write_tree(0);
@@ -78,7 +79,7 @@ fn test_same_type() {
     // Check that we have exactly the paths we expect in the merged tree
     let names = merged_tree
         .entries_non_recursive()
-        .map(|entry| entry.name().as_str())
+        .map(|entry| entry.name().as_internal_str())
         .collect_vec();
     assert_eq!(
         names,
@@ -207,7 +208,7 @@ fn test_executable() {
             }
         }
         let tree_id = tree_builder.write_tree().unwrap();
-        store.get_tree(RepoPath::root(), &tree_id).unwrap()
+        store.get_tree(RepoPathBuf::root(), &tree_id).unwrap()
     };
 
     fn contents_in_tree<'a>(files: &[&'a str], index: usize) -> Vec<(&'a str, bool)> {
@@ -255,7 +256,7 @@ fn test_subtrees() {
             );
         }
         let tree_id = tree_builder.write_tree().unwrap();
-        store.get_tree(RepoPath::root(), &tree_id).unwrap()
+        store.get_tree(RepoPathBuf::root(), &tree_id).unwrap()
     };
 
     let base_tree = write_tree(vec!["f1", "d1/f1", "d1/d1/f1", "d1/d1/d1/f1"]);
@@ -309,7 +310,7 @@ fn test_subtree_becomes_empty() {
             );
         }
         let tree_id = tree_builder.write_tree().unwrap();
-        store.get_tree(RepoPath::root(), &tree_id).unwrap()
+        store.get_tree(RepoPathBuf::root(), &tree_id).unwrap()
     };
 
     let base_tree = write_tree(vec!["f1", "d1/f1", "d1/d1/d1/f1", "d1/d1/d1/f2"]);
@@ -338,7 +339,7 @@ fn test_subtree_one_missing() {
             );
         }
         let tree_id = tree_builder.write_tree().unwrap();
-        store.get_tree(RepoPath::root(), &tree_id).unwrap()
+        store.get_tree(RepoPathBuf::root(), &tree_id).unwrap()
     };
 
     let tree1 = write_tree(vec![]);
@@ -405,11 +406,11 @@ fn test_types() {
         "contents",
     );
     let base_tree_id = base_tree_builder.write_tree().unwrap();
-    let base_tree = store.get_tree(RepoPath::root(), &base_tree_id).unwrap();
+    let base_tree = store.get_tree(RepoPathBuf::root(), &base_tree_id).unwrap();
     let side1_tree_id = side1_tree_builder.write_tree().unwrap();
-    let side1_tree = store.get_tree(RepoPath::root(), &side1_tree_id).unwrap();
+    let side1_tree = store.get_tree(RepoPathBuf::root(), &side1_tree_id).unwrap();
     let side2_tree_id = side2_tree_builder.write_tree().unwrap();
-    let side2_tree = store.get_tree(RepoPath::root(), &side2_tree_id).unwrap();
+    let side2_tree = store.get_tree(RepoPathBuf::root(), &side2_tree_id).unwrap();
 
     // Created the merged tree
     let merged_tree = merge_trees(&side1_tree, &base_tree, &side2_tree).unwrap();
@@ -499,7 +500,10 @@ fn test_simplify_conflict() {
     match further_rebased_tree.value(component).unwrap() {
         TreeValue::Conflict(id) => {
             let conflict = store
-                .read_conflict(RepoPath::from_internal_string(component.as_str()), id)
+                .read_conflict(
+                    RepoPath::from_internal_string(component.as_internal_str()),
+                    id,
+                )
                 .unwrap();
             assert_eq!(
                 conflict.removes().map(|v| v.as_ref()).collect_vec(),
@@ -538,7 +542,6 @@ fn test_simplify_conflict() {
 
 #[test]
 fn test_simplify_conflict_after_resolving_parent() {
-    let settings = testutils::user_settings();
     let test_repo = TestRepo::init();
     let repo = &test_repo.repo;
 
@@ -555,50 +558,34 @@ fn test_simplify_conflict_after_resolving_parent() {
     // rebase C2 (the rebased C) onto the resolved conflict. C3 should not have
     // a conflict since it changed an unrelated line.
     let path = RepoPath::from_internal_string("dir/file");
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     let tree_a = create_tree(repo, &[(path, "abc\ndef\nghi\n")]);
     let commit_a = tx
         .repo_mut()
-        .new_commit(
-            &settings,
-            vec![repo.store().root_commit_id().clone()],
-            tree_a.id(),
-        )
+        .new_commit(vec![repo.store().root_commit_id().clone()], tree_a.id())
         .write()
         .unwrap();
     let tree_b = create_tree(repo, &[(path, "Abc\ndef\nghi\n")]);
     let commit_b = tx
         .repo_mut()
-        .new_commit(&settings, vec![commit_a.id().clone()], tree_b.id())
+        .new_commit(vec![commit_a.id().clone()], tree_b.id())
         .write()
         .unwrap();
     let tree_c = create_tree(repo, &[(path, "Abc\ndef\nGhi\n")]);
     let commit_c = tx
         .repo_mut()
-        .new_commit(&settings, vec![commit_b.id().clone()], tree_c.id())
+        .new_commit(vec![commit_b.id().clone()], tree_c.id())
         .write()
         .unwrap();
     let tree_d = create_tree(repo, &[(path, "abC\ndef\nghi\n")]);
     let commit_d = tx
         .repo_mut()
-        .new_commit(&settings, vec![commit_a.id().clone()], tree_d.id())
+        .new_commit(vec![commit_a.id().clone()], tree_d.id())
         .write()
         .unwrap();
 
-    let commit_b2 = rebase_commit(
-        &settings,
-        tx.repo_mut(),
-        commit_b,
-        vec![commit_d.id().clone()],
-    )
-    .unwrap();
-    let commit_c2 = rebase_commit(
-        &settings,
-        tx.repo_mut(),
-        commit_c,
-        vec![commit_b2.id().clone()],
-    )
-    .unwrap();
+    let commit_b2 = rebase_commit(tx.repo_mut(), commit_b, vec![commit_d.id().clone()]).unwrap();
+    let commit_c2 = rebase_commit(tx.repo_mut(), commit_c, vec![commit_b2.id().clone()]).unwrap();
 
     // Test the setup: Both B and C should have conflicts.
     let tree_b2 = commit_b2.tree().unwrap();
@@ -610,19 +597,13 @@ fn test_simplify_conflict_after_resolving_parent() {
     let tree_b3 = create_tree(repo, &[(path, "AbC\ndef\nghi\n")]);
     let commit_b3 = tx
         .repo_mut()
-        .rewrite_commit(&settings, &commit_b2)
+        .rewrite_commit(&commit_b2)
         .set_tree_id(tree_b3.id())
         .write()
         .unwrap();
-    let commit_c3 = rebase_commit(
-        &settings,
-        tx.repo_mut(),
-        commit_c2,
-        vec![commit_b3.id().clone()],
-    )
-    .unwrap();
-    tx.repo_mut().rebase_descendants(&settings).unwrap();
-    let repo = tx.commit("test");
+    let commit_c3 = rebase_commit(tx.repo_mut(), commit_c2, vec![commit_b3.id().clone()]).unwrap();
+    tx.repo_mut().rebase_descendants().unwrap();
+    let repo = tx.commit("test").unwrap();
 
     // The conflict should now be resolved.
     let tree_c2 = commit_c3.tree().unwrap();
@@ -645,3 +626,63 @@ fn test_simplify_conflict_after_resolving_parent() {
 
 // TODO: Add tests for simplification of multi-way conflicts. Both the content
 // and the executable bit need testing.
+
+#[test]
+fn test_rebase_on_lossy_merge() {
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+
+    // Test this rebase:
+    // D    foo=2          D'   foo=3
+    // |\                  |\
+    // | C  foo=2          | C' foo=3
+    // | |           =>    | |
+    // B |  foo=2          B |  foo=2
+    // |/                  |/
+    // A    foo=1          A    foo=1
+    //
+    // Commit D effectively discarded a change from "1" to "2", so one
+    // reasonable result in D' is "3". That's what the result would be if we
+    // didn't have the "A+(A-B)=A" rule. It's also what the result currently
+    // is because we don't attempt to resolve the auto-merged parents (if we
+    // had, it would have been resolved to just "2" before the rebase and we
+    // get a conflict after the rebase).
+    let path = RepoPath::from_internal_string("foo");
+    let mut tx = repo.start_transaction();
+    let repo_mut = tx.repo_mut();
+    let tree_1 = create_tree(repo, &[(path, "1")]);
+    let tree_2 = create_tree(repo, &[(path, "2")]);
+    let tree_3 = create_tree(repo, &[(path, "3")]);
+    let commit_a = repo_mut
+        .new_commit(vec![repo.store().root_commit_id().clone()], tree_1.id())
+        .write()
+        .unwrap();
+    let commit_b = repo_mut
+        .new_commit(vec![commit_a.id().clone()], tree_2.id())
+        .write()
+        .unwrap();
+    let commit_c = repo_mut
+        .new_commit(vec![commit_a.id().clone()], tree_2.id())
+        .write()
+        .unwrap();
+    let commit_d = repo_mut
+        .new_commit(
+            vec![commit_b.id().clone(), commit_c.id().clone()],
+            tree_2.id(),
+        )
+        .write()
+        .unwrap();
+
+    let commit_c2 = repo_mut
+        .new_commit(vec![commit_a.id().clone()], tree_3.id())
+        .write()
+        .unwrap();
+    let commit_d2 = rebase_commit(
+        repo_mut,
+        commit_d,
+        vec![commit_b.id().clone(), commit_c2.id().clone()],
+    )
+    .unwrap();
+
+    assert_eq!(*commit_d2.tree_id(), tree_3.id());
+}

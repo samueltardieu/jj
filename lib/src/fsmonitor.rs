@@ -24,10 +24,8 @@
 
 use std::path::PathBuf;
 
-use config::Config;
-use config::ConfigError;
-
-use crate::settings::ConfigResultExt;
+use crate::config::ConfigGetError;
+use crate::settings::UserSettings;
 
 /// Config for Watchman filesystem monitor (<https://facebook.github.io/watchman/>).
 #[derive(Default, Eq, PartialEq, Clone, Debug)]
@@ -51,33 +49,31 @@ pub enum FsmonitorSettings {
 
     /// No filesystem monitor. This is the default if nothing is configured, but
     /// also makes it possible to turn off the monitor on a case-by-case basis
-    /// when the user gives an option like
-    /// `--config-toml='core.fsmonitor="none"'`; useful when e.g. when doing
-    /// analysis of snapshot performance.
+    /// when the user gives an option like `--config=core.fsmonitor=none`;
+    /// useful when e.g. when doing analysis of snapshot performance.
     None,
 }
 
 impl FsmonitorSettings {
     /// Creates an `FsmonitorSettings` from a `config`.
-    pub fn from_config(config: &Config) -> Result<FsmonitorSettings, ConfigError> {
-        match config.get_string("core.fsmonitor") {
-            Ok(s) => match s.as_str() {
-                "watchman" => Ok(Self::Watchman(WatchmanConfig {
-                    register_trigger: config
-                        .get_bool("core.watchman.register_snapshot_trigger")
-                        .optional()?
-                        .unwrap_or_default(),
-                })),
-                "test" => Err(ConfigError::Message(
-                    "cannot use test fsmonitor in real repository".to_string(),
-                )),
-                "none" => Ok(Self::None),
-                other => Err(ConfigError::Message(format!(
-                    "unknown fsmonitor kind: {other}",
-                ))),
-            },
-            Err(ConfigError::NotFound(_)) => Ok(Self::None),
-            Err(err) => Err(err),
+    pub fn from_settings(settings: &UserSettings) -> Result<FsmonitorSettings, ConfigGetError> {
+        let name = "core.fsmonitor";
+        match settings.get_string(name)?.as_ref() {
+            "watchman" => Ok(Self::Watchman(WatchmanConfig {
+                // TODO: rename to "register-snapshot-trigger" for consistency?
+                register_trigger: settings.get_bool("core.watchman.register_snapshot_trigger")?,
+            })),
+            "test" => Err(ConfigGetError::Type {
+                name: name.to_owned(),
+                error: "Cannot use test fsmonitor in real repository".into(),
+                source_path: None,
+            }),
+            "none" => Ok(Self::None),
+            other => Err(ConfigGetError::Type {
+                name: name.to_owned(),
+                error: format!("Unknown fsmonitor kind: {other}").into(),
+                source_path: None,
+            }),
         }
     }
 }

@@ -14,12 +14,14 @@
 
 use std::io::Write;
 
+use clap_complete::ArgValueCandidates;
 use jj_lib::object_id::ObjectId;
 use tracing::instrument;
 
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
 use crate::command_error::CommandError;
+use crate::complete;
 use crate::ui::Ui;
 
 /// Sets the specified revision as the working-copy revision
@@ -27,10 +29,11 @@ use crate::ui::Ui;
 /// Note: it is generally recommended to instead use `jj new` and `jj
 /// squash`.
 ///
-/// For more information, see https://martinvonz.github.io/jj/latest/FAQ#how-do-i-resume-working-on-an-existing-change
+/// For more information, see https://jj-vcs.github.io/jj/latest/FAQ#how-do-i-resume-working-on-an-existing-change
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct EditArgs {
     /// The commit to edit
+    #[arg(value_name = "REVSET", add = ArgValueCandidates::new(complete::mutable_revisions))]
     revision: RevisionArg,
     /// Ignored (but lets you pass `-r` for consistency with other commands)
     #[arg(short = 'r', hide = true)]

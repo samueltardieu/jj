@@ -42,7 +42,7 @@ The commit message should describe the changes in the commit;
 the PR description can even be empty, but feel free to include a personal
 message. We start the commit message with `<topic>: `  and don't use
 [conventional commits](https://www.conventionalcommits.org/en/v1.0.0/). This means if
-you modified a command in the CLI, use its name as the topic, e.g
+you modified a command in the CLI, use its name as the topic, e.g.
 `next/prev: <your-modification>` or `conflicts: <your-modification>`. We don't
 currently have a specific guidelines on what to write in the topic field, but
 the reviewers will help you provide a topic if you have difficulties choosing
@@ -85,9 +85,9 @@ stakeholders, which we do with [Design Docs](design_docs.md), see the
 ## Contributing to the documentation
 
 We appreciate [bug
-reports](https://github.com/martinvonz/jj/issues/new?template=bug_report.md)
+reports](https://github.com/jj-vcs/jj/issues/new?template=bug_report.md)
 about any problems, however small, lurking in [our documentation
-website](https://martinvonz.github.io/jj/prerelease) or in the `jj help
+website](https://jj-vcs.github.io/jj/prerelease) or in the `jj help
 <command>` docs. If a part of the bug report template does not apply, you can
 just delete it.
 
@@ -99,14 +99,14 @@ You can use the version switcher in the top-left of the website to do so.
 If you are willing to make a PR fixing a documentation problem, even better!
 
 The documentation website sources are Markdown files located in the [`docs/`
-directory](https://github.com/martinvonz/jj/tree/main/docs). You do not need to
+directory](https://github.com/jj-vcs/jj/tree/main/docs). You do not need to
 know Rust to work with them. See below for [instructions on how to preview the
 HTML docs](#previewing-the-html-documentation) as you edit the Markdown files.
 Doing so is optional, but recommended.
 
 The `jj help` docs are sourced from the "docstring" comments inside the Rust
 sources, currently from the [`cli/src/commands`
-directory](https://github.com/martinvonz/jj/tree/main/cli/src/commands). Working
+directory](https://github.com/jj-vcs/jj/tree/main/cli/src/commands). Working
 on them requires setting up a Rust development environment, as described
 below, and may occasionally require adjusting a test.
 
@@ -147,10 +147,12 @@ During development (adapt according to your preference):
     cargo nextest run --workspace # Occasionally
     cargo insta test --workspace --test-runner nextest # Occasionally
 
-WARNING: Build artifacts from debug builds and especially from repeated
-invocations of `cargo test` can quickly take up 10s of GB of disk space.
-Cargo will happily use up your entire hard drive. If this happens, run
-`cargo clean`.
+!!! warning
+
+    Build artifacts from debug builds and especially from repeated
+    invocations of `cargo test` can quickly take up 10s of GB of disk space.
+    Cargo will happily use up your entire hard drive. If this happens, run
+    `cargo clean`.
 
 ### Explanation
 
@@ -216,92 +218,165 @@ to use" instructions](https://github.com/rui314/mold#how-to-use).
 On recent versions of MacOS, the default linker Rust uses is already
 multi-threaded. It should use all the CPU cores without any configuration.
 
+### Editor setup
+
+#### Visual Studio Code
+
+We recommend at least these settings:
+
+```js
+{
+    "files.insertFinalNewline": true,
+    "files.trimTrailingWhitespace": true,
+    "[rust]": {
+        "files.trimTrailingWhitespace": false
+    }
+}
+```
+
+#### Zed
+
+```js
+// .zed/settings.json
+{
+  "ensure_final_newline_on_save": true,
+  "remove_trailing_whitespace_on_save": true,
+
+  "languages": {
+    // We don't use a formatter for Markdown files, so format_on_save would just
+    // mess with others' docs
+    "Markdown": { "format_on_save": "off" }
+    "Rust": {
+      "format_on_save": "on",
+      // Avoid removing trailing spaces within multi-line string literals
+      "remove_trailing_whitespace_on_save": false
+    }
+  },
+
+  "lsp": {
+    "rust-analyzer": {
+      "initialization_options": {
+        // If you are working on docs and don't need `cargo check`, uncomment
+        // this option:
+        //
+        //   "checkOnSave": false,
+
+        // Use nightly `rustfmt`, equivalent to `cargo +nightly fmt`
+        "rustfmt": { "extraArgs": ["+nightly"] }
+      }
+    }
+  }
+}
+```
 
 ## Previewing the HTML documentation
 
-The documentation for `jj` is automatically published to the website at
-<https://martinvonz.github.io/jj/>.
+The documentation for `jj` is automatically published online at
+<https://jj-vcs.github.io/jj/>.
 
-When editing documentation, we'd appreciate it if you checked that the
-result will look as expected when published to the website.
+When editing documentation, you should check your changes locally — especially
+if you are adding a new page, or doing a major rewrite.
 
-### Setting up the prerequisites
+### Install `uv`
 
-To build the website, you must have Python and `poetry 1.8+` installed (the
-latest version is recommended). It is easiest to install `poetry` via `pipx`, as
-explained in the [Poetry installation instructions]. A few helpful points from
-the instructions: `pipx` can often be installed from your distribution, e.g.
-`sudo apt install pipx`; this will usually also install Python for you if
-necessary. Any version of `pipx` will do. If you are installing `pipx` manually,
-you may first need to follow the [Python installation instructions].
+The only thing you need is [`uv`][uv] (version 0.5.1 or newer).
 
-[Python installation instructions]: https://docs.python.org/3/using/index.html
-[Poetry installation instructions]: https://python-poetry.org/docs/#installation
+`uv` is a Python project manager written in Rust. It will fetch the right Python
+version and the dependencies needed to build the docs. Install it like so:
 
-Once you have `poetry` installed, you should ask it to install the rest
-of the required tools into a virtual environment as follows:
+[uv]: https://docs.astral.sh/uv/
 
-```shell
-poetry install
+=== "macOS/Linux"
+
+    ``` { .shell .copy }
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    ```
+
+    !!! note
+        If you don't have `~/.local/bin` in your `PATH`, the installer will
+        modify your shell profile. To avoid it:
+
+        ``` { .shell .copy }
+        curl -LsSf https://astral.sh/uv/install.sh | env INSTALLER_NO_MODIFY_PATH=1 sh
+        ```
+
+=== "Windows"
+
+    ``` { .shell .copy }
+    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+    ```
+
+=== "Homebrew"
+
+    ``` { .shell .copy }
+    brew install uv
+    ```
+
+=== "Cargo"
+
+    ``` { .shell .copy }
+    # This might take a while
+    cargo install --git https://github.com/astral-sh/uv uv
+    ```
+
+=== "Other options"
+
+    * Directly download the binaries from GitHub: [uv releases](https://github.com/astral-sh/uv/releases).
+    * Even more options: [Installing uv](https://docs.astral.sh/uv/getting-started/installation/).
+
+### Build the docs
+
+To build the docs, run from the root of the `jj` repository:
+
+``` { .shell .copy }
+uv run mkdocs serve
 ```
 
-You may get requests to "unlock a keyring", [an error messages about failing to
-do so](https://github.com/python-poetry/poetry/issues/1917), or Poetry may
-[simply hang indefinitely](https://github.com/python-poetry/poetry/issues/8623).
-The workaround is to either to unlock the keyring or to run the following, and
-then to try `poetry install` again:
+Open <http://127.0.0.1:8000> in your browser to see the docs.
 
-```shell
-# For sh-compatible shells or recent versions of `fish`
-export PYTHON_KEYRING_BACKEND=keyring.backends.fail.Keyring
-```
+As you edit the `.md` files in `docs/`, the website should be rebuilt and
+reloaded in your browser automatically.
 
-### Building the HTML docs locally (with live reload)
+!!! note "If the docs are not updating"
+    Check the terminal from which you ran `uv run mkdocs serve` for any build
+    errors or warnings. Warnings about `"GET /versions.json HTTP/1.1" code 404`
+    are expected and harmless.
 
-The HTML docs are built with [MkDocs](https://github.com/mkdocs/mkdocs). After
-following the above steps, you should be able to view the docs by running
+## Building the entire website
 
-```shell
-# Note: this and all the commands below should be run from the root of
-# the `jj` source tree.
-poetry run -- mkdocs serve
-```
+!!! tip
+    Building the entire website is not usually necessary. If you are editing
+    documentation, the previous section is enough.
 
-and opening <http://127.0.0.1:8000> in your browser.
-
-As you edit the `md` files, the website should be rebuilt and reloaded in your
-browser automatically, unless build errors occur.
-
-You should occasionally check the terminal from which you ran `mkdocs serve` for
-any build errors or warnings. Warnings about `"GET /versions.json HTTP/1.1" code
-404` are expected and harmless.
-
-### How to build the entire website (not usually necessary)
+    These instructions are relevant if you are working on the versioning of the
+    documentation that we currently do with `mike`.
 
 The full `jj` website includes the documentation for several `jj` versions
 (`prerelease`, latest release, and the older releases). The top-level
-URL <https://martinvonz.github.io/jj> redirects to
-<https://martinvonz.github.io/jj/latest>, which in turn redirects to
+URL <https://jj-vcs.github.io/jj> redirects to
+<https://jj-vcs.github.io/jj/latest>, which in turn redirects to
 the docs for the last stable version.
 
 The different versions of documentation are managed and deployed with
 [`mike`](https://github.com/jimporter/mike), which can be run with
-`poetry run -- mike`.
+`uv run mike`.
 
 On a POSIX system or WSL, one way to build the entire website is as follows (on
 Windows, you'll need to understand and adapt the shell script):
 
 1. Check out `jj` as a co-located `jj + git` repository (`jj clone --colocate`),
-cloned from your fork of `jj` (e.g. `jjfan.github.com/jj`). You can also use a
+cloned from your fork of `jj` (e.g. `github.com/jjfan/jj`). You can also use a
 pure Git repo if you prefer.
 
-2. Make sure `jjfan.github.com/jj` includes the `gh-pages` bookmark of the jj repo
+2. Make sure `github.com/jjfan/jj` includes the `gh-pages` bookmark of the jj repo
 and run `git fetch origin gh-pages`.
 
 3. Go to the GitHub repository settings, enable GitHub Pages, and configure them
 to use the `gh-pages` bookmark (this is usually the default).
 
-4. Run the same `sh` script that is used in GitHub CI (details below):
+4. Install `uv` as explained in [Previewing the HTML
+documentation](#previewing-the-html-documentation), and run the same `sh` script
+that is used in GitHub CI (details below):
 
     ```shell
     .github/scripts/docs-build-deploy 'https://jjfan.github.io/jj/'\
@@ -340,18 +415,18 @@ this can be done with:
     If you want to preserve some of the changes you made, you can do `jj bookmark
     set my-changes -r gh-pages` BEFORE running the above commands.
 
-#### Explanation of the `docs-build-deploy` script
+### Explanation of the `docs-build-deploy` script
 
 The script sets up the `site_url` mkdocs config to
 `'https://jjfan.github.io/jj/'`. If this config does not match the URL
 where you loaded the website, some minor website features (like the
 version switching widget) will have reduced functionality.
 
-Then, the script passes the rest of its arguments to `potery run -- mike
-deploy`, which does the rest of the job. Run `poetry run -- mike help deploy` to
+Then, the script passes the rest of its arguments to `uv run mike
+deploy`, which does the rest of the job. Run `uv run mike help deploy` to
 find out what the arguments do.
 
-If you need to do something more complicated, you can use `poetry run -- mike
+If you need to do something more complicated, you can use `uv run mike
 ...` commands. You can also edit the `gh-pages` bookmark directly, but take care
 to avoid files that will be overwritten by future invocations of `mike`. Then,
 you can submit a PR based on the `gh-pages` bookmark of
@@ -379,6 +454,16 @@ you can submit a PR based on the `gh-pages` bookmark of
 
  The `.rs` files generated from `.proto` files are included in the repository,
  and there is a GitHub CI check that will complain if they do not match.
+
+## Logging
+
+You can print internal jj logs using `JJ_LOG`. It acts like the `RUST_LOG`
+environment variable, frequent in Rust codebases, and accepts one or more
+[directives]. You can also use the `--debug` global option that sets
+`debug` log level for all targets by default. `JJ_LOG` is still respected when
+using `--debug`.
+
+[directives]: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives
 
 ## Profiling
 

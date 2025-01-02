@@ -206,7 +206,7 @@ impl GitBackend {
     ) -> Result<Self, Box<GitBackendInitError>> {
         let canonical_workspace_root = {
             let path = store_path.join(workspace_root);
-            path.canonicalize()
+            dunce::canonicalize(&path)
                 .context(&path)
                 .map_err(GitBackendInitError::Path)?
         };
@@ -430,7 +430,7 @@ impl GitBackend {
         );
         let filter = gix::diff::blob::Pipeline::new(
             Default::default(),
-            gix_filter::Pipeline::new(
+            gix::filter::plumbing::Pipeline::new(
                 self.git_repo()
                     .command_context()
                     .map_err(|err| BackendError::Other(Box::new(err)))?,
@@ -472,9 +472,9 @@ impl GitBackend {
 pub fn canonicalize_git_repo_path(path: &Path) -> io::Result<PathBuf> {
     if path.ends_with(".git") {
         let workdir = path.parent().unwrap();
-        workdir.canonicalize().map(|dir| dir.join(".git"))
+        dunce::canonicalize(workdir).map(|dir| dir.join(".git"))
     } else {
-        path.canonicalize()
+        dunce::canonicalize(path)
     }
 }
 
@@ -769,7 +769,7 @@ fn recreate_no_gc_refs(
         // TODO: might be better to switch to a dummy merge, where new no-gc ref
         // will always have a unique name. Doing that with the current
         // ref-per-head strategy would increase the number of the no-gc refs.
-        // https://github.com/martinvonz/jj/pull/2659#issuecomment-1837057782
+        // https://github.com/jj-vcs/jj/pull/2659#issuecomment-1837057782
         let loose_ref_path = git_repo.path().join(git_ref.name.to_path());
         if let Ok(metadata) = loose_ref_path.metadata() {
             let mtime = metadata.modified().expect("unsupported platform?");
@@ -806,8 +806,8 @@ fn run_git_gc(git_dir: &Path) -> Result<(), GitGcError> {
     let mut git = Command::new("git");
     git.arg("--git-dir=."); // turn off discovery
     git.arg("gc");
-    // Don't specify it by GIT_DIR/--git-dir. On Windows, the "\\?\" path might
-    // not be supported by git.
+    // Don't specify it by GIT_DIR/--git-dir. On Windows, the path could be
+    // canonicalized as UNC path, which wouldn't be supported by git.
     git.current_dir(git_dir);
     // TODO: pass output to UI layer instead of printing directly here
     let status = git.status().map_err(GitGcError::GcCommand)?;
@@ -1060,7 +1060,7 @@ impl Backend for GitBackend {
         let entries = contents
             .entries()
             .map(|entry| {
-                let name = entry.name().as_str();
+                let name = entry.name().as_internal_str();
                 match entry.value() {
                     TreeValue::File {
                         id,
@@ -1178,7 +1178,7 @@ impl Backend for GitBackend {
             // TODO: Remove this hack and map to ObjectNotFound error if we're sure that
             // there are no reachable ancestor commits without extras metadata. Git commits
             // imported by jj < 0.8.0 might not have extras (#924).
-            // https://github.com/martinvonz/jj/issues/2343
+            // https://github.com/jj-vcs/jj/issues/2343
             tracing::info!("unimported Git commit found");
             self.import_head_commits([id])?;
             let table = self.cached_extra_metadata_table()?;
@@ -1319,14 +1319,10 @@ impl Backend for GitBackend {
 
         let change_to_copy_record =
             |change: gix::object::tree::diff::Change| -> BackendResult<Option<CopyRecord>> {
-                let gix::object::tree::diff::Change {
+                let gix::object::tree::diff::Change::Rewrite {
+                    source_location,
+                    source_id,
                     location: dest_location,
-                    event:
-                        gix::object::tree::diff::change::Event::Rewrite {
-                            source_location,
-                            source_id,
-                            ..
-                        },
                     ..
                 } = change
                 else {
@@ -1353,19 +1349,19 @@ impl Backend for GitBackend {
             };
 
         let mut records: Vec<BackendResult<CopyRecord>> = Vec::new();
-        let mut change_platform = root_tree
+        root_tree
             .changes()
-            .map_err(|err| BackendError::Other(err.into()))?;
-        change_platform.track_path();
-        change_platform.track_rewrites(Some(gix::diff::Rewrites {
-            copies: Some(gix::diff::rewrites::Copies {
-                source: gix::diff::rewrites::CopySource::FromSetOfModifiedFiles,
-                percentage: Some(0.5),
-            }),
-            percentage: Some(0.5),
-            limit: 1000,
-        }));
-        change_platform
+            .map_err(|err| BackendError::Other(err.into()))?
+            .options(|opts| {
+                opts.track_path().track_rewrites(Some(gix::diff::Rewrites {
+                    copies: Some(gix::diff::rewrites::Copies {
+                        source: gix::diff::rewrites::CopySource::FromSetOfModifiedFiles,
+                        percentage: Some(0.5),
+                    }),
+                    percentage: Some(0.5),
+                    limit: 1000,
+                }));
+            })
             .for_each_to_obtain_tree_with_cache(
                 &head_tree,
                 &mut self.new_diff_platform()?,
@@ -1428,13 +1424,13 @@ fn write_tree_conflict(
     .collect_vec();
     let readme_id = repo
         .write_blob(
-            r#"This commit was made by jj, https://github.com/martinvonz/jj.
+            r#"This commit was made by jj, https://github.com/jj-vcs/jj.
 The commit contains file conflicts, and therefore looks wrong when used with plain
 Git or other tools that are unfamiliar with jj.
 
 The .jjconflict-* directories represent the different inputs to the conflict.
 For details, see
-https://martinvonz.github.io/jj/prerelease/git-compatibility/#format-mapping-details
+https://jj-vcs.github.io/jj/prerelease/git-compatibility/#format-mapping-details
 
 If you see this file in your working copy, it probably means that you used a
 regular `git` command to check out a conflicted commit. Use `jj abandon` to
@@ -1540,6 +1536,7 @@ mod tests {
     use test_case::test_case;
 
     use super::*;
+    use crate::config::StackedConfig;
     use crate::content_hash::blake2b_hash;
 
     #[test_case(false; "legacy tree format")]
@@ -1660,7 +1657,7 @@ mod tests {
         let mut root_entries = root_tree.entries();
         let dir = root_entries.next().unwrap();
         assert_eq!(root_entries.next(), None);
-        assert_eq!(dir.name().as_str(), "dir");
+        assert_eq!(dir.name().as_internal_str(), "dir");
         assert_eq!(
             dir.value(),
             &TreeValue::Tree(TreeId::from_bytes(dir_tree_id.as_bytes()))
@@ -1677,7 +1674,7 @@ mod tests {
         let file = entries.next().unwrap();
         let symlink = entries.next().unwrap();
         assert_eq!(entries.next(), None);
-        assert_eq!(file.name().as_str(), "normal");
+        assert_eq!(file.name().as_internal_str(), "normal");
         assert_eq!(
             file.value(),
             &TreeValue::File {
@@ -1685,7 +1682,7 @@ mod tests {
                 executable: false
             }
         );
-        assert_eq!(symlink.name().as_str(), "symlink");
+        assert_eq!(symlink.name().as_internal_str(), "symlink");
         assert_eq!(
             symlink.value(),
             &TreeValue::Symlink(SymlinkId::from_bytes(blob2.as_bytes()))
@@ -1770,10 +1767,11 @@ mod tests {
         // libgit2-rs works with &strs here for some reason
         let commit_buf = std::str::from_utf8(&commit_buf).unwrap();
         let secure_sig =
-            "here are some ASCII bytes to be used as a test signature\n\ndefinitely not PGP";
+            "here are some ASCII bytes to be used as a test signature\n\ndefinitely not PGP\n";
 
+        // git2 appears to append newline unconditionally
         let git_commit_id = git_repo
-            .commit_signed(commit_buf, secure_sig, None)
+            .commit_signed(commit_buf, secure_sig.trim_end_matches('\n'), None)
             .unwrap();
 
         let backend = GitBackend::init_external(&settings, store_path, git_repo.path()).unwrap();
@@ -2157,7 +2155,7 @@ mod tests {
 
         let mut signer = |data: &_| {
             let hash: String = blake2b_hash(data).encode_hex();
-            Ok(format!("test sig\n\n\nhash={hash}").into_bytes())
+            Ok(format!("test sig\n\n\nhash={hash}\n").into_bytes())
         };
 
         let (id, commit) = backend
@@ -2223,7 +2221,7 @@ mod tests {
     // UserSettings type. testutils returns jj_lib (2)'s UserSettings, whereas
     // our UserSettings type comes from jj_lib (1).
     fn user_settings() -> UserSettings {
-        let config = config::Config::default();
-        UserSettings::from_config(config)
+        let config = StackedConfig::with_defaults();
+        UserSettings::from_config(config).unwrap()
     }
 }

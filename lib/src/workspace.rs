@@ -33,6 +33,7 @@ use crate::file_util::PathError;
 use crate::local_backend::LocalBackend;
 use crate::local_working_copy::LocalWorkingCopy;
 use crate::local_working_copy::LocalWorkingCopyFactory;
+use crate::op_heads_store::OpHeadsStoreError;
 use crate::op_store::OperationId;
 use crate::op_store::WorkspaceId;
 use crate::repo::read_store_type;
@@ -53,6 +54,7 @@ use crate::signing::SignInitError;
 use crate::signing::Signer;
 use crate::store::Store;
 use crate::working_copy::CheckoutError;
+use crate::working_copy::CheckoutOptions;
 use crate::working_copy::CheckoutStats;
 use crate::working_copy::LockedWorkingCopy;
 use crate::working_copy::WorkingCopy;
@@ -71,6 +73,8 @@ pub enum WorkspaceInitError {
     WorkingCopyState(#[from] WorkingCopyStateError),
     #[error(transparent)]
     Path(#[from] PathError),
+    #[error(transparent)]
+    OpHeadsStore(#[from] OpHeadsStoreError),
     #[error(transparent)]
     Backend(#[from] BackendInitError),
     #[error(transparent)]
@@ -97,7 +101,7 @@ pub enum WorkspaceLoadError {
 ///
 /// Represents the combination of a repo and working copy, i.e. what's typically
 /// the .jj/ directory and its parent. See
-/// <https://github.com/martinvonz/jj/blob/main/docs/working-copy.md#workspaces>
+/// <https://github.com/jj-vcs/jj/blob/main/docs/working-copy.md#workspaces>
 /// for more information.
 pub struct Workspace {
     // Path to the workspace root (typically the parent of a .jj/ directory), which is where
@@ -120,7 +124,6 @@ fn create_jj_dir(workspace_root: &Path) -> Result<PathBuf, WorkspaceInitError> {
 }
 
 fn init_working_copy(
-    user_settings: &UserSettings,
     repo: &Arc<ReadonlyRepo>,
     workspace_root: &Path,
     jj_dir: &Path,
@@ -130,13 +133,10 @@ fn init_working_copy(
     let working_copy_state_path = jj_dir.join("working_copy");
     std::fs::create_dir(&working_copy_state_path).context(&working_copy_state_path)?;
 
-    let mut tx = repo.start_transaction(user_settings);
-    tx.repo_mut().check_out(
-        workspace_id.clone(),
-        user_settings,
-        &repo.store().root_commit(),
-    )?;
-    let repo = tx.commit(format!("add workspace '{}'", workspace_id.as_str()));
+    let mut tx = repo.start_transaction();
+    tx.repo_mut()
+        .check_out(workspace_id.clone(), &repo.store().root_commit())?;
+    let repo = tx.commit(format!("add workspace '{}'", workspace_id.as_str()))?;
 
     let working_copy = working_copy_factory.init_working_copy(
         repo.store().clone(),
@@ -157,7 +157,7 @@ impl Workspace {
         working_copy: Box<dyn WorkingCopy>,
         repo_loader: RepoLoader,
     ) -> Result<Workspace, PathError> {
-        let workspace_root = workspace_root.canonicalize().context(workspace_root)?;
+        let workspace_root = dunce::canonicalize(workspace_root).context(workspace_root)?;
         Ok(Self::new_no_canonicalize(
             workspace_root,
             repo_path,
@@ -220,7 +220,7 @@ impl Workspace {
             // ReadonlyRepo::init(). workspace_root will be canonicalized by
             // Workspace::new(), but it's not yet here.
             let store_relative_workspace_root =
-                if let Ok(workspace_root) = workspace_root.canonicalize() {
+                if let Ok(workspace_root) = dunce::canonicalize(workspace_root) {
                     crate::file_util::relative_path(store_path, &workspace_root)
                 } else {
                     workspace_root.to_owned()
@@ -255,7 +255,7 @@ impl Workspace {
             // ReadonlyRepo::init(). workspace_root will be canonicalized by
             // Workspace::new(), but it's not yet here.
             let store_relative_git_repo_path = match (
-                workspace_root.canonicalize(),
+                dunce::canonicalize(workspace_root),
                 crate::git_backend::canonicalize_git_repo_path(git_repo_path),
             ) {
                 (Ok(workspace_root), Ok(git_repo_path))
@@ -305,10 +305,10 @@ impl Workspace {
             )
             .map_err(|repo_init_err| match repo_init_err {
                 RepoInitError::Backend(err) => WorkspaceInitError::Backend(err),
+                RepoInitError::OpHeadsStore(err) => WorkspaceInitError::OpHeadsStore(err),
                 RepoInitError::Path(err) => WorkspaceInitError::Path(err),
             })?;
             let (working_copy, repo) = init_working_copy(
-                user_settings,
                 &repo,
                 workspace_root,
                 &jj_dir,
@@ -345,7 +345,6 @@ impl Workspace {
     }
 
     pub fn init_workspace_with_existing_repo(
-        user_settings: &UserSettings,
         workspace_root: &Path,
         repo_path: &Path,
         repo: &Arc<ReadonlyRepo>,
@@ -354,7 +353,7 @@ impl Workspace {
     ) -> Result<(Self, Arc<ReadonlyRepo>), WorkspaceInitError> {
         let jj_dir = create_jj_dir(workspace_root)?;
 
-        let repo_dir = repo_path.canonicalize().context(repo_path)?;
+        let repo_dir = dunce::canonicalize(repo_path).context(repo_path)?;
         let repo_file_path = jj_dir.join("repo");
         let mut repo_file = File::create(&repo_file_path).context(&repo_file_path)?;
         repo_file
@@ -367,7 +366,6 @@ impl Workspace {
             .context(&repo_file_path)?;
 
         let (working_copy, repo) = init_working_copy(
-            user_settings,
             repo,
             workspace_root,
             &jj_dir,
@@ -429,6 +427,7 @@ impl Workspace {
         operation_id: OperationId,
         old_tree_id: Option<&MergedTreeId>,
         commit: &Commit,
+        options: &CheckoutOptions,
     ) -> Result<CheckoutStats, CheckoutError> {
         let mut locked_ws =
             self.start_working_copy_mutation()
@@ -445,7 +444,7 @@ impl Workspace {
                 return Err(CheckoutError::ConcurrentCheckout);
             }
         }
-        let stats = locked_ws.locked_wc().check_out(commit)?;
+        let stats = locked_ws.locked_wc().check_out(commit, options)?;
         locked_ws
             .finish(operation_id)
             .map_err(|err| CheckoutError::Other {
@@ -560,10 +559,7 @@ impl DefaultWorkspaceLoader {
             let buf = fs::read(&repo_dir).context(&repo_dir)?;
             let repo_path_str =
                 String::from_utf8(buf).map_err(|_| WorkspaceLoadError::NonUnicodePath)?;
-            repo_dir = jj_dir
-                .join(&repo_path_str)
-                .canonicalize()
-                .context(&repo_path_str)?;
+            repo_dir = dunce::canonicalize(jj_dir.join(&repo_path_str)).context(&repo_path_str)?;
             if !repo_dir.is_dir() {
                 return Err(WorkspaceLoadError::RepoDoesNotExist(repo_dir));
             }

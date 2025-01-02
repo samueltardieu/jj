@@ -14,32 +14,44 @@
 
 #![allow(missing_docs)]
 
-use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use chrono::DateTime;
 use rand::prelude::*;
 use rand_chacha::ChaCha20Rng;
+use serde::Deserialize;
 
 use crate::backend::ChangeId;
 use crate::backend::Commit;
 use crate::backend::Signature;
 use crate::backend::Timestamp;
+use crate::config::ConfigGetError;
+use crate::config::ConfigGetResultExt as _;
+use crate::config::ConfigTable;
+use crate::config::ConfigValue;
+use crate::config::StackedConfig;
+use crate::config::ToConfigNamePath;
 use crate::fmt_util::binary_prefix;
 use crate::fsmonitor::FsmonitorSettings;
 use crate::signing::SignBehavior;
 
 #[derive(Debug, Clone)]
 pub struct UserSettings {
-    config: config::Config,
-    timestamp: Option<Timestamp>,
+    config: Arc<StackedConfig>,
+    data: Arc<UserSettingsData>,
     rng: Arc<JJRng>,
 }
 
-#[derive(Debug, Clone)]
-pub struct RepoSettings {
-    _config: config::Config,
+#[derive(Debug)]
+struct UserSettingsData {
+    user_name: String,
+    user_email: String,
+    commit_timestamp: Option<Timestamp>,
+    operation_timestamp: Option<Timestamp>,
+    operation_hostname: String,
+    operation_username: String,
 }
 
 #[derive(Debug, Clone)]
@@ -49,13 +61,19 @@ pub struct GitSettings {
 }
 
 impl GitSettings {
-    pub fn from_config(config: &config::Config) -> Self {
-        GitSettings {
-            auto_local_bookmark: config.get_bool("git.auto-local-branch").unwrap_or(false),
-            abandon_unreachable_commits: config
-                .get_bool("git.abandon-unreachable-commits")
-                .unwrap_or(true),
-        }
+    pub fn from_settings(settings: &UserSettings) -> Result<Self, ConfigGetError> {
+        let auto_local_bookmark = {
+            // TODO: Drop support for git.auto-local-branch and move the default
+            // value to config/*.toml
+            let opt1 = settings.get_bool("git.auto-local-bookmark").optional()?;
+            let opt2 = settings.get_bool("git.auto-local-branch").optional()?;
+            opt1.or(opt2).unwrap_or(false)
+        };
+        let abandon_unreachable_commits = settings.get_bool("git.abandon-unreachable-commits")?;
+        Ok(GitSettings {
+            auto_local_bookmark,
+            abandon_unreachable_commits,
+        })
     }
 }
 
@@ -83,18 +101,15 @@ pub struct SignSettings {
 impl SignSettings {
     /// Load the signing settings from the config.
     pub fn from_settings(settings: &UserSettings) -> Self {
-        let sign_all = settings
-            .config()
-            .get_bool("signing.sign-all")
-            .unwrap_or(false);
+        let sign_all = settings.get_bool("signing.sign-all").unwrap_or(false);
         Self {
             behavior: if sign_all {
                 SignBehavior::Own
             } else {
                 SignBehavior::Keep
             },
-            user_email: settings.user_email(),
-            key: settings.config().get_string("signing.key").ok(),
+            user_email: settings.user_email().to_owned(),
+            key: settings.get_string("signing.key").ok(),
         }
     }
 
@@ -112,58 +127,86 @@ impl SignSettings {
     }
 }
 
-fn get_timestamp_config(config: &config::Config, key: &str) -> Option<Timestamp> {
-    match config.get_string(key) {
-        Ok(timestamp_str) => match DateTime::parse_from_rfc3339(&timestamp_str) {
-            Ok(datetime) => Some(Timestamp::from_datetime(datetime)),
-            Err(_) => None,
-        },
-        Err(_) => None,
+fn to_timestamp(value: ConfigValue) -> Result<Timestamp, Box<dyn std::error::Error + Send + Sync>> {
+    // Since toml_edit::Datetime isn't the date-time type used across our code
+    // base, we accept both string and date-time types.
+    if let Some(s) = value.as_str() {
+        Ok(Timestamp::from_datetime(DateTime::parse_from_rfc3339(s)?))
+    } else if let Some(d) = value.as_datetime() {
+        // It's easier to re-parse the TOML date-time expression.
+        let s = d.to_string();
+        Ok(Timestamp::from_datetime(DateTime::parse_from_rfc3339(&s)?))
+    } else {
+        let ty = value.type_name();
+        Err(format!("invalid type: {ty}, expected a date-time").into())
     }
-}
-
-fn get_rng_seed_config(config: &config::Config) -> Option<u64> {
-    config
-        .get_string("debug.randomness-seed")
-        .ok()
-        .and_then(|str| str.parse().ok())
 }
 
 impl UserSettings {
-    pub fn from_config(config: config::Config) -> Self {
-        let timestamp = get_timestamp_config(&config, "debug.commit-timestamp");
-        let rng_seed = get_rng_seed_config(&config);
-        UserSettings {
-            config,
-            timestamp,
+    pub fn from_config(config: StackedConfig) -> Result<Self, ConfigGetError> {
+        let user_name = config.get("user.name")?;
+        let user_email = config.get("user.email")?;
+        let commit_timestamp = config
+            .get_value_with("debug.commit-timestamp", to_timestamp)
+            .optional()?;
+        let operation_timestamp = config
+            .get_value_with("debug.operation-timestamp", to_timestamp)
+            .optional()?;
+        // whoami::fallible::*() failure isn't a ConfigGetError, but user would
+        // have to set the corresponding config keys if these parameter can't be
+        // obtained from the system. Instead of handling environment data here,
+        // it might be better to load them by CLI and insert as a config layer.
+        let operation_hostname = config
+            .get("operation.hostname")
+            .optional()?
+            .map_or_else(whoami::fallible::hostname, Ok)
+            .map_err(|err| ConfigGetError::Type {
+                name: "operation.hostname".to_owned(),
+                error: err.into(),
+                source_path: None,
+            })?;
+        let operation_username = config
+            .get("operation.username")
+            .optional()?
+            .map_or_else(whoami::fallible::username, Ok)
+            .map_err(|err| ConfigGetError::Type {
+                name: "operation.username".to_owned(),
+                error: err.into(),
+                source_path: None,
+            })?;
+        let data = UserSettingsData {
+            user_name,
+            user_email,
+            commit_timestamp,
+            operation_timestamp,
+            operation_hostname,
+            operation_username,
+        };
+        let rng_seed = config.get::<u64>("debug.randomness-seed").optional()?;
+        Ok(UserSettings {
+            config: Arc::new(config),
+            data: Arc::new(data),
             rng: Arc::new(JJRng::new(rng_seed)),
-        }
-    }
-
-    // TODO: Reconsider UserSettings/RepoSettings abstraction. See
-    // https://github.com/martinvonz/jj/issues/616#issuecomment-1345170699
-    pub fn with_repo(&self, _repo_path: &Path) -> Result<RepoSettings, config::ConfigError> {
-        let config = self.config.clone();
-        Ok(RepoSettings { _config: config })
+        })
     }
 
     pub fn get_rng(&self) -> Arc<JJRng> {
         self.rng.clone()
     }
 
-    pub fn user_name(&self) -> String {
-        self.config.get_string("user.name").unwrap_or_default()
+    pub fn user_name(&self) -> &str {
+        &self.data.user_name
     }
 
     // Must not be changed to avoid git pushing older commits with no set name
     pub const USER_NAME_PLACEHOLDER: &'static str = "(no name configured)";
 
-    pub fn user_email(&self) -> String {
-        self.config.get_string("user.email").unwrap_or_default()
+    pub fn user_email(&self) -> &str {
+        &self.data.user_email
     }
 
-    pub fn fsmonitor_settings(&self) -> Result<FsmonitorSettings, config::ConfigError> {
-        FsmonitorSettings::from_config(&self.config)
+    pub fn fsmonitor_settings(&self) -> Result<FsmonitorSettings, ConfigGetError> {
+        FsmonitorSettings::from_settings(self)
     }
 
     // Must not be changed to avoid git pushing older commits with no set email
@@ -171,90 +214,104 @@ impl UserSettings {
     pub const USER_EMAIL_PLACEHOLDER: &'static str = "(no email configured)";
 
     pub fn commit_timestamp(&self) -> Option<Timestamp> {
-        self.timestamp
+        self.data.commit_timestamp
     }
 
     pub fn operation_timestamp(&self) -> Option<Timestamp> {
-        get_timestamp_config(&self.config, "debug.operation-timestamp")
+        self.data.operation_timestamp
     }
 
-    pub fn operation_hostname(&self) -> String {
-        self.config
-            .get_string("operation.hostname")
-            .unwrap_or_else(|_| whoami::fallible::hostname().expect("valid hostname"))
+    pub fn operation_hostname(&self) -> &str {
+        &self.data.operation_hostname
     }
 
-    pub fn operation_username(&self) -> String {
-        self.config
-            .get_string("operation.username")
-            .unwrap_or_else(|_| whoami::username())
-    }
-
-    pub fn push_bookmark_prefix(&self) -> String {
-        self.config
-            .get_string("git.push-bookmark-prefix")
-            .unwrap_or_else(|_| "push-".to_string())
-    }
-
-    pub fn push_branch_prefix(&self) -> Option<String> {
-        self.config.get_string("git.push-branch-prefix").ok()
-    }
-
-    pub fn default_description(&self) -> String {
-        self.config()
-            .get_string("ui.default-description")
-            .unwrap_or_default()
-    }
-
-    pub fn default_revset(&self) -> String {
-        self.config.get_string("revsets.log").unwrap_or_default()
+    pub fn operation_username(&self) -> &str {
+        &self.data.operation_username
     }
 
     pub fn signature(&self) -> Signature {
-        let timestamp = self.timestamp.unwrap_or_else(Timestamp::now);
+        let timestamp = self.data.commit_timestamp.unwrap_or_else(Timestamp::now);
         Signature {
-            name: self.user_name(),
-            email: self.user_email(),
+            name: self.user_name().to_owned(),
+            email: self.user_email().to_owned(),
             timestamp,
         }
     }
 
-    pub fn allow_native_backend(&self) -> bool {
-        self.config
-            .get_bool("ui.allow-init-native")
-            .unwrap_or(false)
-    }
-
-    pub fn config(&self) -> &config::Config {
+    /// Returns low-level config object.
+    ///
+    /// You should typically use `settings.get_<type>()` methods instead.
+    pub fn config(&self) -> &StackedConfig {
         &self.config
     }
 
-    pub fn git_settings(&self) -> GitSettings {
-        GitSettings::from_config(&self.config)
-    }
-
-    pub fn max_new_file_size(&self) -> Result<u64, config::ConfigError> {
-        let cfg = self
-            .config
-            .get::<HumanByteSize>("snapshot.max-new-file-size")
-            .map(|x| x.0);
-        match cfg {
-            Ok(0) => Ok(u64::MAX),
-            x @ Ok(_) => x,
-            Err(config::ConfigError::NotFound(_)) => Ok(1024 * 1024),
-            e @ Err(_) => e,
-        }
+    pub fn git_settings(&self) -> Result<GitSettings, ConfigGetError> {
+        GitSettings::from_settings(self)
     }
 
     // separate from sign_settings as those two are needed in pretty different
     // places
-    pub fn signing_backend(&self) -> Option<String> {
-        let backend = self.config.get_string("signing.backend").ok()?;
-        (backend.as_str() != "none").then_some(backend)
+    pub fn signing_backend(&self) -> Result<Option<String>, ConfigGetError> {
+        let backend = self.get_string("signing.backend")?;
+        Ok((backend != "none").then_some(backend))
     }
 
     pub fn sign_settings(&self) -> SignSettings {
+        // TODO: propagate config error
         SignSettings::from_settings(self)
+    }
+}
+
+/// General-purpose accessors.
+impl UserSettings {
+    /// Looks up value of the specified type `T` by `name`.
+    pub fn get<'de, T: Deserialize<'de>>(
+        &self,
+        name: impl ToConfigNamePath,
+    ) -> Result<T, ConfigGetError> {
+        self.config.get(name)
+    }
+
+    /// Looks up string value by `name`.
+    pub fn get_string(&self, name: impl ToConfigNamePath) -> Result<String, ConfigGetError> {
+        self.get(name)
+    }
+
+    /// Looks up integer value by `name`.
+    pub fn get_int(&self, name: impl ToConfigNamePath) -> Result<i64, ConfigGetError> {
+        self.get(name)
+    }
+
+    /// Looks up boolean value by `name`.
+    pub fn get_bool(&self, name: impl ToConfigNamePath) -> Result<bool, ConfigGetError> {
+        self.get(name)
+    }
+
+    /// Looks up generic value by `name`.
+    pub fn get_value(&self, name: impl ToConfigNamePath) -> Result<ConfigValue, ConfigGetError> {
+        self.config.get_value(name)
+    }
+
+    /// Looks up value by `name`, converts it by using the given function.
+    pub fn get_value_with<T, E: Into<Box<dyn std::error::Error + Send + Sync>>>(
+        &self,
+        name: impl ToConfigNamePath,
+        convert: impl FnOnce(ConfigValue) -> Result<T, E>,
+    ) -> Result<T, ConfigGetError> {
+        self.config.get_value_with(name, convert)
+    }
+
+    /// Looks up sub table by `name`.
+    ///
+    /// Use `table_keys(prefix)` and `get([prefix, key])` instead if table
+    /// values have to be converted to non-generic value type.
+    pub fn get_table(&self, name: impl ToConfigNamePath) -> Result<ConfigTable, ConfigGetError> {
+        self.config.get_table(name)
+    }
+
+    /// Returns iterator over sub table keys at `name`.
+    pub fn table_keys(&self, name: impl ToConfigNamePath) -> impl Iterator<Item = &str> {
+        self.config.table_keys(name)
     }
 }
 
@@ -284,23 +341,8 @@ impl JJRng {
     }
 }
 
-pub trait ConfigResultExt<T> {
-    fn optional(self) -> Result<Option<T>, config::ConfigError>;
-}
-
-impl<T> ConfigResultExt<T> for Result<T, config::ConfigError> {
-    fn optional(self) -> Result<Option<T>, config::ConfigError> {
-        match self {
-            Ok(value) => Ok(Some(value)),
-            Err(config::ConfigError::NotFound(_)) => Ok(None),
-            Err(err) => Err(err),
-        }
-    }
-}
-
 /// A size in bytes optionally formatted/serialized with binary prefixes
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, serde::Deserialize)]
-#[serde(try_from = "String")]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct HumanByteSize(pub u64);
 
 impl std::fmt::Display for HumanByteSize {
@@ -310,22 +352,36 @@ impl std::fmt::Display for HumanByteSize {
     }
 }
 
-impl TryFrom<String> for HumanByteSize {
-    type Error = String;
+impl FromStr for HumanByteSize {
+    type Err = &'static str;
 
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        let res = value.parse::<u64>();
-        match res {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.parse() {
             Ok(bytes) => Ok(HumanByteSize(bytes)),
             Err(_) => {
-                let bytes = parse_human_byte_size(&value)?;
+                let bytes = parse_human_byte_size(s)?;
                 Ok(HumanByteSize(bytes))
             }
         }
     }
 }
 
-fn parse_human_byte_size(v: &str) -> Result<u64, &str> {
+impl TryFrom<ConfigValue> for HumanByteSize {
+    type Error = &'static str;
+
+    fn try_from(value: ConfigValue) -> Result<Self, Self::Error> {
+        if let Some(n) = value.as_integer() {
+            let n = u64::try_from(n).map_err(|_| "Integer out of range")?;
+            Ok(HumanByteSize(n))
+        } else if let Some(s) = value.as_str() {
+            s.parse()
+        } else {
+            Err("Expected a positive integer or a string in '<number><unit>' form")
+        }
+    }
+}
+
+fn parse_human_byte_size(v: &str) -> Result<u64, &'static str> {
     let digit_end = v.find(|c: char| !c.is_ascii_digit()).unwrap_or(v.len());
     if digit_end == 0 {
         return Err("must start with a number");
@@ -352,6 +408,8 @@ fn parse_human_byte_size(v: &str) -> Result<u64, &str> {
 
 #[cfg(test)]
 mod tests {
+    use assert_matches::assert_matches;
+
     use super::*;
 
     #[test]
@@ -375,5 +433,21 @@ mod tests {
             Err("must start with a number")
         );
         assert_eq!(parse_human_byte_size(""), Err("must start with a number"));
+    }
+
+    #[test]
+    fn byte_size_from_config_value() {
+        assert_eq!(
+            HumanByteSize::try_from(ConfigValue::from(42)).unwrap(),
+            HumanByteSize(42)
+        );
+        assert_eq!(
+            HumanByteSize::try_from(ConfigValue::from("42K")).unwrap(),
+            HumanByteSize(42 * 1024)
+        );
+        assert_matches!(
+            HumanByteSize::try_from(ConfigValue::from(-1)),
+            Err("Integer out of range")
+        );
     }
 }

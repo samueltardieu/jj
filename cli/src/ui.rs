@@ -32,11 +32,14 @@ use std::thread::JoinHandle;
 
 use indoc::indoc;
 use itertools::Itertools as _;
+use jj_lib::config::ConfigGetError;
+use jj_lib::config::StackedConfig;
 use minus::MinusError;
 use minus::Pager as MinusPager;
+use serde::de::Deserialize as _;
+use serde::de::IntoDeserializer as _;
 use tracing::instrument;
 
-use crate::command_error::config_error_with_message;
 use crate::command_error::CommandError;
 use crate::config::CommandNameAndArgs;
 use crate::formatter::Formatter;
@@ -180,7 +183,7 @@ impl UiOutput {
 
                                     Possible workarounds:
                                     - Use `jj --no-pager`
-                                    - Configure a different pager, see https://martinvonz.github.io/jj/latest/windows/#pagination for Git Bash on Windows
+                                    - Configure a different pager, see https://jj-vcs.github.io/jj/latest/windows/#pagination for Git Bash on Windows
                                     - Use a different terminal (e.g. Windows Terminal or the Command Prompt)
                                     - Use `winpty jj ...`; `winpty` comes with Git Bash or Cygwin."#
                                 }
@@ -261,11 +264,8 @@ pub struct Ui {
     output: UiOutput,
 }
 
-fn progress_indicator_setting(config: &config::Config) -> bool {
-    config.get_bool("ui.progress-indicator").unwrap_or(true)
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ColorChoice {
     Always,
     Never,
@@ -275,16 +275,13 @@ pub enum ColorChoice {
 }
 
 impl FromStr for ColorChoice {
-    type Err = &'static str;
+    type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "always" => Ok(ColorChoice::Always),
-            "never" => Ok(ColorChoice::Never),
-            "debug" => Ok(ColorChoice::Debug),
-            "auto" => Ok(ColorChoice::Auto),
-            _ => Err("must be one of always, never, or auto"),
-        }
+        // serde::de::value::Error is Box<str> wrapper. Map it to String to hide
+        // the implementation detail.
+        Self::deserialize(s.into_deserializer())
+            .map_err(|err: serde::de::value::Error| err.to_string())
     }
 }
 
@@ -300,20 +297,12 @@ impl fmt::Display for ColorChoice {
     }
 }
 
-fn color_setting(config: &config::Config) -> ColorChoice {
-    config
-        .get_string("ui.color")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_default()
-}
-
 fn prepare_formatter_factory(
-    config: &config::Config,
+    config: &StackedConfig,
     stdout: &Stdout,
-) -> Result<FormatterFactory, config::ConfigError> {
+) -> Result<FormatterFactory, ConfigGetError> {
     let terminal = stdout.is_terminal();
-    let (color, debug) = match color_setting(config) {
+    let (color, debug) = match config.get("ui.color")? {
         ColorChoice::Always => (true, false),
         ColorChoice::Never => (false, false),
         ColorChoice::Debug => (true, true),
@@ -330,10 +319,6 @@ fn prepare_formatter_factory(
     }
 }
 
-fn be_quiet(config: &config::Config) -> bool {
-    config.get_bool("ui.quiet").unwrap_or_default()
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
 #[serde(rename_all(deserialize = "kebab-case"))]
 pub enum PaginationChoice {
@@ -342,38 +327,24 @@ pub enum PaginationChoice {
     Auto,
 }
 
-fn pagination_setting(config: &config::Config) -> Result<PaginationChoice, CommandError> {
-    config
-        .get::<PaginationChoice>("ui.paginate")
-        .map_err(|err| config_error_with_message("Invalid `ui.paginate`", err))
-}
-
-fn pager_setting(config: &config::Config) -> Result<CommandNameAndArgs, CommandError> {
-    config
-        .get::<CommandNameAndArgs>("ui.pager")
-        .map_err(|err| config_error_with_message("Invalid `ui.pager`", err))
-}
-
 impl Ui {
-    pub fn with_config(config: &config::Config) -> Result<Ui, CommandError> {
-        let quiet = be_quiet(config);
+    pub fn with_config(config: &StackedConfig) -> Result<Ui, CommandError> {
         let formatter_factory = prepare_formatter_factory(config, &io::stdout())?;
-        let progress_indicator = progress_indicator_setting(config);
         Ok(Ui {
-            quiet,
+            quiet: config.get("ui.quiet")?,
             formatter_factory,
-            pager_cmd: pager_setting(config)?,
-            paginate: pagination_setting(config)?,
-            progress_indicator,
+            pager_cmd: config.get("ui.pager")?,
+            paginate: config.get("ui.paginate")?,
+            progress_indicator: config.get("ui.progress-indicator")?,
             output: UiOutput::new_terminal(),
         })
     }
 
-    pub fn reset(&mut self, config: &config::Config) -> Result<(), CommandError> {
-        self.quiet = be_quiet(config);
-        self.paginate = pagination_setting(config)?;
-        self.pager_cmd = pager_setting(config)?;
-        self.progress_indicator = progress_indicator_setting(config);
+    pub fn reset(&mut self, config: &StackedConfig) -> Result<(), CommandError> {
+        self.quiet = config.get("ui.quiet")?;
+        self.paginate = config.get("ui.paginate")?;
+        self.pager_cmd = config.get("ui.pager")?;
+        self.progress_indicator = config.get("ui.progress-indicator")?;
         self.formatter_factory = prepare_formatter_factory(config, &io::stdout())?;
         Ok(())
     }
@@ -475,10 +446,9 @@ impl Ui {
         }
     }
 
-    pub fn progress_output(&self) -> Option<ProgressOutput> {
-        self.use_progress_indicator().then(|| ProgressOutput {
-            output: io::stderr(),
-        })
+    pub fn progress_output(&self) -> Option<ProgressOutput<std::io::Stderr>> {
+        self.use_progress_indicator()
+            .then(ProgressOutput::for_stderr)
     }
 
     /// Writer to print an update that's not part of the command's main output.
@@ -654,22 +624,31 @@ impl Ui {
 }
 
 #[derive(Debug)]
-pub struct ProgressOutput {
-    output: Stderr,
+pub struct ProgressOutput<W> {
+    output: W,
+    term_width: Option<u16>,
 }
 
-impl ProgressOutput {
-    pub fn write_fmt(&mut self, fmt: fmt::Arguments<'_>) -> io::Result<()> {
-        self.output.write_fmt(fmt)
+impl ProgressOutput<io::Stderr> {
+    pub fn for_stderr() -> ProgressOutput<io::Stderr> {
+        ProgressOutput {
+            output: io::stderr(),
+            term_width: None,
+        }
     }
+}
 
-    pub fn flush(&mut self) -> io::Result<()> {
-        self.output.flush()
+impl<W> ProgressOutput<W> {
+    pub fn for_test(output: W, term_width: u16) -> Self {
+        Self {
+            output,
+            term_width: Some(term_width),
+        }
     }
 
     pub fn term_width(&self) -> Option<u16> {
         // Terminal can be resized while progress is displayed, so don't cache it.
-        term_width()
+        self.term_width.or_else(term_width)
     }
 
     /// Construct a guard object which writes `text` when dropped. Useful for
@@ -679,6 +658,16 @@ impl ProgressOutput {
             text,
             output: io::stderr(),
         }
+    }
+}
+
+impl<W: Write> ProgressOutput<W> {
+    pub fn write_fmt(&mut self, fmt: fmt::Arguments<'_>) -> io::Result<()> {
+        self.output.write_fmt(fmt)
+    }
+
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.output.flush()
     }
 }
 

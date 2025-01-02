@@ -19,6 +19,7 @@ use itertools::Itertools;
 use jj_lib::backend::CommitId;
 use jj_lib::commit::Commit;
 use jj_lib::repo::Repo;
+use jj_lib::revset::ResolvedRevsetExpression;
 use jj_lib::revset::RevsetExpression;
 use jj_lib::revset::RevsetFilterPredicate;
 use jj_lib::revset::RevsetIteratorExt;
@@ -117,10 +118,10 @@ impl Direction {
 
     fn build_target_revset(
         &self,
-        working_revset: &Rc<RevsetExpression>,
-        start_revset: &Rc<RevsetExpression>,
+        working_revset: &Rc<ResolvedRevsetExpression>,
+        start_revset: &Rc<ResolvedRevsetExpression>,
         args: &MovementArgsInternal,
-    ) -> Result<Rc<RevsetExpression>, CommandError> {
+    ) -> Result<Rc<ResolvedRevsetExpression>, CommandError> {
         let nth = match (self, args.should_edit) {
             (Direction::Next, true) => start_revset.descendants_at(args.offset),
             (Direction::Next, false) => start_revset
@@ -167,7 +168,7 @@ fn get_target_commit(
     let target_revset = direction.build_target_revset(&wc_revset, &start_revset, args)?;
 
     let targets: Vec<Commit> = target_revset
-        .evaluate_programmatic(workspace_command.repo().as_ref())?
+        .evaluate(workspace_command.repo().as_ref())?
         .iter()
         .commits(workspace_command.repo().store())
         .try_collect()?;
@@ -177,7 +178,7 @@ fn get_target_commit(
         [] => {
             // We found no ancestor/descendant.
             let start_commits: Vec<Commit> = start_revset
-                .evaluate_programmatic(workspace_command.repo().as_ref())?
+                .evaluate(workspace_command.repo().as_ref())?
                 .iter()
                 .commits(workspace_command.repo().store())
                 .try_collect()?;
@@ -237,7 +238,7 @@ pub(crate) fn move_to_commit(
         .get_wc_commit_id()
         .ok_or_else(|| user_error("This command requires a working copy"))?;
 
-    let config_edit_flag = command.settings().config().get_bool("ui.movement.edit")?;
+    let config_edit_flag = command.settings().get_bool("ui.movement.edit")?;
     let args = MovementArgsInternal {
         should_edit: args.edit || (!args.no_edit && config_edit_flag),
         offset: args.offset,

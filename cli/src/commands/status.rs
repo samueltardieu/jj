@@ -32,12 +32,12 @@ use crate::ui::Ui;
 ///
 ///  * The working copy commit and its (first) parent, and a summary of the
 ///    changes between them
-///  * Conflicted bookmarks (see https://martinvonz.github.io/jj/latest/bookmarks/)
+///  * Conflicted bookmarks (see https://jj-vcs.github.io/jj/latest/bookmarks/)
 #[derive(clap::Args, Clone, Debug)]
 #[command(visible_alias = "st")]
 pub(crate) struct StatusArgs {
     /// Restrict the status display to these paths
-    #[arg(value_hint = clap::ValueHint::AnyPath)]
+    #[arg(value_name = "FILESETS", value_hint = clap::ValueHint::AnyPath)]
     paths: Vec<String>,
 }
 
@@ -93,7 +93,7 @@ pub(crate) fn cmd_status(
                 formatter.labeled("conflict"),
                 "There are unresolved conflicts at these paths:"
             )?;
-            print_conflicted_paths(&conflicts, formatter, &workspace_command)?;
+            print_conflicted_paths(conflicts, formatter, &workspace_command)?;
         }
 
         let template = workspace_command.commit_summary_template();
@@ -111,7 +111,7 @@ pub(crate) fn cmd_status(
             let wc_revset = RevsetExpression::commit(wc_commit.id().clone());
 
             // Ancestors with conflicts, excluding the current working copy commit.
-            let ancestors_conflicts = workspace_command
+            let ancestors_conflicts: Vec<_> = workspace_command
                 .attach_revset_evaluator(
                     wc_revset
                         .parents()
@@ -120,7 +120,7 @@ pub(crate) fn cmd_status(
                         .minus(&workspace_command.env().immutable_expression()),
                 )
                 .evaluate_to_commit_ids()?
-                .collect();
+                .try_collect()?;
 
             workspace_command.report_repo_conflicts(formatter, repo, ancestors_conflicts)?;
         } else {

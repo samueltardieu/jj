@@ -140,11 +140,11 @@ fn test_init_git_external(bare: bool) {
     // Check that the Git repo's HEAD got checked out
     let stdout = test_env.jj_cmd_success(&repo_path, &["log", "-r", "@-"]);
     insta::allow_duplicates! {
-        insta::assert_snapshot!(stdout, @r###"
-        ○  mwrttmos git.user@example.com 1970-01-01 11:02:03 my-bookmark HEAD@git 8d698d4a
+        insta::assert_snapshot!(stdout, @r#"
+        ○  mwrttmos git.user@example.com 1970-01-01 11:02:03 my-bookmark git_head() 8d698d4a
         │  My commit message
         ~
-        "###);
+        "#);
     }
 }
 
@@ -208,20 +208,20 @@ fn test_init_git_colocated() {
 
     // Check that the Git repo's HEAD got checked out
     let stdout = test_env.jj_cmd_success(&repo_path, &["log", "-r", "@-"]);
-    insta::assert_snapshot!(stdout, @r###"
-    ○  mwrttmos git.user@example.com 1970-01-01 11:02:03 my-bookmark HEAD@git 8d698d4a
+    insta::assert_snapshot!(stdout, @r#"
+    ○  mwrttmos git.user@example.com 1970-01-01 11:02:03 my-bookmark git_head() 8d698d4a
     │  My commit message
     ~
-    "###);
+    "#);
 
     // Check that the Git repo's HEAD moves
     test_env.jj_cmd_ok(&workspace_root, &["new"]);
     let stdout = test_env.jj_cmd_success(&workspace_root, &["log", "-r", "@-"]);
-    insta::assert_snapshot!(stdout, @r###"
-    ○  sqpuoqvx test.user@example.com 2001-02-03 08:05:07 HEAD@git f61b77cd
+    insta::assert_snapshot!(stdout, @r#"
+    ○  sqpuoqvx test.user@example.com 2001-02-03 08:05:07 git_head() f61b77cd
     │  (no description set)
     ~
-    "###);
+    "#);
 }
 
 #[test]
@@ -247,20 +247,20 @@ fn test_init_git_colocated_gitlink() {
 
     // Check that the Git repo's HEAD got checked out
     let stdout = test_env.jj_cmd_success(&workspace_root, &["log", "-r", "@-"]);
-    insta::assert_snapshot!(stdout, @r###"
-    ○  mwrttmos git.user@example.com 1970-01-01 11:02:03 my-bookmark HEAD@git 8d698d4a
+    insta::assert_snapshot!(stdout, @r#"
+    ○  mwrttmos git.user@example.com 1970-01-01 11:02:03 my-bookmark git_head() 8d698d4a
     │  My commit message
     ~
-    "###);
+    "#);
 
     // Check that the Git repo's HEAD moves
     test_env.jj_cmd_ok(&workspace_root, &["new"]);
     let stdout = test_env.jj_cmd_success(&workspace_root, &["log", "-r", "@-"]);
-    insta::assert_snapshot!(stdout, @r###"
-    ○  sqpuoqvx test.user@example.com 2001-02-03 08:05:07 HEAD@git f61b77cd
+    insta::assert_snapshot!(stdout, @r#"
+    ○  sqpuoqvx test.user@example.com 2001-02-03 08:05:07 git_head() f61b77cd
     │  (no description set)
     ~
-    "###);
+    "#);
 }
 
 #[cfg(unix)]
@@ -285,20 +285,20 @@ fn test_init_git_colocated_symlink_directory() {
 
     // Check that the Git repo's HEAD got checked out
     let stdout = test_env.jj_cmd_success(&workspace_root, &["log", "-r", "@-"]);
-    insta::assert_snapshot!(stdout, @r###"
-    ○  mwrttmos git.user@example.com 1970-01-01 11:02:03 my-bookmark HEAD@git 8d698d4a
+    insta::assert_snapshot!(stdout, @r#"
+    ○  mwrttmos git.user@example.com 1970-01-01 11:02:03 my-bookmark git_head() 8d698d4a
     │  My commit message
     ~
-    "###);
+    "#);
 
     // Check that the Git repo's HEAD moves
     test_env.jj_cmd_ok(&workspace_root, &["new"]);
     let stdout = test_env.jj_cmd_success(&workspace_root, &["log", "-r", "@-"]);
-    insta::assert_snapshot!(stdout, @r###"
-    ○  sqpuoqvx test.user@example.com 2001-02-03 08:05:07 HEAD@git f61b77cd
+    insta::assert_snapshot!(stdout, @r#"
+    ○  sqpuoqvx test.user@example.com 2001-02-03 08:05:07 git_head() f61b77cd
     │  (no description set)
     ~
-    "###);
+    "#);
 }
 
 #[cfg(unix)]
@@ -326,20 +326,20 @@ fn test_init_git_colocated_symlink_directory_without_bare_config() {
 
     // Check that the Git repo's HEAD got checked out
     let stdout = test_env.jj_cmd_success(&workspace_root, &["log", "-r", "@-"]);
-    insta::assert_snapshot!(stdout, @r###"
-    ○  mwrttmos git.user@example.com 1970-01-01 11:02:03 my-bookmark HEAD@git 8d698d4a
+    insta::assert_snapshot!(stdout, @r#"
+    ○  mwrttmos git.user@example.com 1970-01-01 11:02:03 my-bookmark git_head() 8d698d4a
     │  My commit message
     ~
-    "###);
+    "#);
 
     // Check that the Git repo's HEAD moves
     test_env.jj_cmd_ok(&workspace_root, &["new"]);
     let stdout = test_env.jj_cmd_success(&workspace_root, &["log", "-r", "@-"]);
-    insta::assert_snapshot!(stdout, @r###"
-    ○  sqpuoqvx test.user@example.com 2001-02-03 08:05:07 HEAD@git f61b77cd
+    insta::assert_snapshot!(stdout, @r#"
+    ○  sqpuoqvx test.user@example.com 2001-02-03 08:05:07 git_head() f61b77cd
     │  (no description set)
     ~
-    "###);
+    "#);
 }
 
 #[cfg(unix)]
@@ -369,26 +369,26 @@ fn test_init_git_colocated_symlink_gitlink() {
 
     // Check that the Git repo's HEAD got checked out
     let stdout = test_env.jj_cmd_success(&workspace_root, &["log", "-r", "@-"]);
-    insta::assert_snapshot!(stdout, @r###"
-    ○  mwrttmos git.user@example.com 1970-01-01 11:02:03 my-bookmark HEAD@git 8d698d4a
+    insta::assert_snapshot!(stdout, @r#"
+    ○  mwrttmos git.user@example.com 1970-01-01 11:02:03 my-bookmark git_head() 8d698d4a
     │  My commit message
     ~
-    "###);
+    "#);
 
     // Check that the Git repo's HEAD moves
     test_env.jj_cmd_ok(&workspace_root, &["new"]);
     let stdout = test_env.jj_cmd_success(&workspace_root, &["log", "-r", "@-"]);
-    insta::assert_snapshot!(stdout, @r###"
-    ○  sqpuoqvx test.user@example.com 2001-02-03 08:05:07 HEAD@git f61b77cd
+    insta::assert_snapshot!(stdout, @r#"
+    ○  sqpuoqvx test.user@example.com 2001-02-03 08:05:07 git_head() f61b77cd
     │  (no description set)
     ~
-    "###);
+    "#);
 }
 
 #[test]
 fn test_init_git_colocated_imported_refs() {
     let test_env = TestEnvironment::default();
-    test_env.add_config("git.auto-local-branch = true");
+    test_env.add_config("git.auto-local-bookmark = true");
 
     // Set up remote refs
     test_env.jj_cmd_ok(test_env.env_root(), &["init", "remote", "--git"]);
@@ -417,7 +417,7 @@ fn test_init_git_colocated_imported_refs() {
             .unwrap();
     };
 
-    // With git.auto-local-branch = true
+    // With git.auto-local-bookmark = true
     let local_path = test_env.env_root().join("local1");
     set_up_local_repo(&local_path);
     let (_stdout, stderr) = test_env.jj_cmd_ok(&local_path, &["init", "--git-repo=."]);
@@ -436,8 +436,8 @@ fn test_init_git_colocated_imported_refs() {
       @origin: vvkvtnvv 230dd059 (empty) (no description set)
     "###);
 
-    // With git.auto-local-branch = false
-    test_env.add_config("git.auto-local-branch = false");
+    // With git.auto-local-bookmark = false
+    test_env.add_config("git.auto-local-bookmark = false");
     let local_path = test_env.env_root().join("local2");
     set_up_local_repo(&local_path);
     let (_stdout, stderr) = test_env.jj_cmd_ok(&local_path, &["init", "--git-repo=."]);

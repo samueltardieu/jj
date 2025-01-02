@@ -34,14 +34,14 @@ pub struct TagListArgs {
     ///
     /// By default, the specified name matches exactly. Use `glob:` prefix to
     /// select tags by wildcard pattern. For details, see
-    /// https://martinvonz.github.io/jj/latest/revsets/#string-patterns.
+    /// https://jj-vcs.github.io/jj/latest/revsets/#string-patterns.
     #[arg(value_parser = StringPattern::parse)]
     pub names: Vec<StringPattern>,
     /// Render each tag using the given template
     ///
     /// All 0-argument methods of the `RefName` type are available as keywords.
     ///
-    /// For the syntax, see https://martinvonz.github.io/jj/latest/templates/
+    /// For the syntax, see https://jj-vcs.github.io/jj/latest/templates/
     #[arg(long, short = 'T')]
     template: Option<String>,
 }
@@ -69,7 +69,7 @@ fn cmd_tag_list(
         let language = workspace_command.commit_template_language();
         let text = match &args.template {
             Some(value) => value.to_owned(),
-            None => command.settings().config().get("templates.tag_list")?,
+            None => command.settings().get("templates.tag_list")?,
         };
         workspace_command
             .parse_template(ui, &language, &text, CommitTemplateLanguage::wrap_ref_name)?

@@ -12,30 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use jj_lib::repo_path::RepoPathBuf;
 use tracing::instrument;
 
-use super::new;
+use super::update_sparse_patterns_with;
 use crate::cli_util::CommandHelper;
-use crate::command_error::cli_error;
 use crate::command_error::CommandError;
 use crate::ui::Ui;
 
+/// Reset the patterns to include all files in the working copy
+#[derive(clap::Args, Clone, Debug)]
+pub struct SparseResetArgs {}
+
 #[instrument(skip_all)]
-pub(crate) fn cmd_merge(
+pub fn cmd_sparse_reset(
     ui: &mut Ui,
     command: &CommandHelper,
-    args: &new::NewArgs,
+    _args: &SparseResetArgs,
 ) -> Result<(), CommandError> {
-    writeln!(
-        ui.warning_default(),
-        "`jj merge` is deprecated; use `jj new` instead, which is equivalent"
-    )?;
-    writeln!(
-        ui.warning_default(),
-        "`jj merge` will be removed in a future version, and this will be a hard error"
-    )?;
-    if args.revisions.len() < 2 {
-        return Err(cli_error("Merge requires at least two revisions"));
-    }
-    new::cmd_new(ui, command, args)
+    let mut workspace_command = command.workspace_helper(ui)?;
+    update_sparse_patterns_with(ui, &mut workspace_command, |_ui, _old_patterns| {
+        Ok(vec![RepoPathBuf::root()])
+    })
 }

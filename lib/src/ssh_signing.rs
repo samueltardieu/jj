@@ -26,6 +26,9 @@ use std::process::Stdio;
 use either::Either;
 use thiserror::Error;
 
+use crate::config::ConfigGetError;
+use crate::config::ConfigGetResultExt as _;
+use crate::settings::UserSettings;
 use crate::signing::SigStatus;
 use crate::signing::SignError;
 use crate::signing::SigningBackend;
@@ -116,16 +119,12 @@ impl SshBackend {
         }
     }
 
-    pub fn from_config(config: &config::Config) -> Self {
-        Self::new(
-            config
-                .get_string("signing.backends.ssh.program")
-                .unwrap_or_else(|_| "ssh-keygen".into())
-                .into(),
-            config
-                .get_string("signing.backends.ssh.allowed-signers")
-                .map_or(None, |v| Some(v.into())),
-        )
+    pub fn from_settings(settings: &UserSettings) -> Result<Self, ConfigGetError> {
+        let program = settings.get_string("signing.backends.ssh.program")?;
+        let allowed_signers = settings
+            .get_string("signing.backends.ssh.allowed-signers")
+            .optional()?;
+        Ok(Self::new(program.into(), allowed_signers.map(|v| v.into())))
     }
 
     fn create_command(&self) -> Command {

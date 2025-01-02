@@ -57,18 +57,17 @@ fn test_debug_revset() {
     insta::with_settings!({filters => vec![
         (r"(?m)(^    .*\n)+", "    ..\n"),
     ]}, {
-        assert_snapshot!(stdout, @r###"
+        assert_snapshot!(stdout, @r"
         -- Parsed:
-        CommitRef(
-            ..
-        )
-
-        -- Optimized:
-        CommitRef(
-            ..
-        )
+        Root
 
         -- Resolved:
+        Root
+
+        -- Optimized:
+        Root
+
+        -- Backend:
         Commits(
             ..
         )
@@ -80,7 +79,7 @@ fn test_debug_revset() {
 
         -- Commit IDs:
         0000000000000000000000000000000000000000
-        "###);
+        ");
     });
 }
 

@@ -14,6 +14,7 @@
 
 use insta::assert_snapshot;
 
+use crate::common::strip_last_line;
 use crate::common::TestEnvironment;
 
 #[test]
@@ -27,7 +28,7 @@ fn test_util_config_schema() {
             "$schema": "http://json-schema.org/draft-07/schema",
             "title": "Jujutsu config",
             "type": "object",
-            "description": "User configuration for Jujutsu VCS. See https://martinvonz.github.io/jj/latest/config/ for details",
+            "description": "User configuration for Jujutsu VCS. See https://jj-vcs.github.io/jj/latest/config/ for details",
             "properties": {
                 [...]
             "fix": {
@@ -44,7 +45,7 @@ fn test_gc_args() {
     // Use the local backend because GitBackend::gc() depends on the git CLI.
     test_env.jj_cmd_ok(
         test_env.env_root(),
-        &["init", "repo", "--config-toml=ui.allow-init-native=true"],
+        &["init", "repo", "--config=ui.allow-init-native=true"],
     );
     let repo_path = test_env.env_root().join("repo");
 
@@ -68,7 +69,7 @@ fn test_gc_operation_log() {
     // Use the local backend because GitBackend::gc() depends on the git CLI.
     test_env.jj_cmd_ok(
         test_env.env_root(),
-        &["init", "repo", "--config-toml=ui.allow-init-native=true"],
+        &["init", "repo", "--config=ui.allow-init-native=true"],
     );
     let repo_path = test_env.env_root().join("repo");
 
@@ -111,4 +112,34 @@ fn test_shell_completions() {
     test("fish");
     test("nushell");
     test("zsh");
+}
+
+#[test]
+fn test_util_exec() {
+    let test_env = TestEnvironment::default();
+    let formatter_path = assert_cmd::cargo::cargo_bin("fake-formatter");
+    let (out, err) = test_env.jj_cmd_ok(
+        test_env.env_root(),
+        &[
+            "util",
+            "exec",
+            "--",
+            formatter_path.to_str().unwrap(),
+            "--append",
+            "hello",
+        ],
+    );
+    insta::assert_snapshot!(out, @"hello");
+    // Ensures only stdout contains text
+    assert!(err.is_empty());
+}
+
+#[test]
+fn test_util_exec_fail() {
+    let test_env = TestEnvironment::default();
+    let err = test_env.jj_cmd_failure(
+        test_env.env_root(),
+        &["util", "exec", "--", "missing-program"],
+    );
+    insta::assert_snapshot!(strip_last_line(&err), @"Error: Failed to execute external command 'missing-program'");
 }

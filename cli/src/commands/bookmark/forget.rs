@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use clap_complete::ArgValueCandidates;
 use itertools::Itertools as _;
 use jj_lib::op_store::BookmarkTarget;
 use jj_lib::op_store::RefTarget;
@@ -22,6 +23,7 @@ use jj_lib::view::View;
 use super::find_bookmarks_with;
 use crate::cli_util::CommandHelper;
 use crate::command_error::CommandError;
+use crate::complete;
 use crate::ui::Ui;
 
 /// Forget everything about a bookmark, including its local and remote
@@ -35,8 +37,12 @@ pub struct BookmarkForgetArgs {
     ///
     /// By default, the specified name matches exactly. Use `glob:` prefix to
     /// select bookmarks by wildcard pattern. For details, see
-    /// https://martinvonz.github.io/jj/latest/revsets/#string-patterns.    
-    #[arg(required = true, value_parser = StringPattern::parse)]
+    /// https://jj-vcs.github.io/jj/latest/revsets/#string-patterns.    
+    #[arg(
+        required = true,
+        value_parser = StringPattern::parse,
+        add = ArgValueCandidates::new(complete::bookmarks),
+    )]
     names: Vec<StringPattern>,
 }
 
@@ -73,6 +79,8 @@ fn find_forgettable_bookmarks<'a>(
     name_patterns: &[StringPattern],
 ) -> Result<Vec<(&'a str, BookmarkTarget<'a>)>, CommandError> {
     find_bookmarks_with(name_patterns, |pattern| {
-        view.bookmarks().filter(|(name, _)| pattern.matches(name))
+        view.bookmarks()
+            .filter(|(name, _)| pattern.matches(name))
+            .map(Ok)
     })
 }

@@ -13,6 +13,8 @@
 // limitations under the License.
 use std::io::Write;
 
+use clap_complete::ArgValueCandidates;
+use clap_complete::ArgValueCompleter;
 use jj_lib::object_id::ObjectId;
 use jj_lib::repo::Repo;
 use tracing::instrument;
@@ -21,6 +23,7 @@ use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
 use crate::command_error::user_error_with_hint;
 use crate::command_error::CommandError;
+use crate::complete;
 use crate::description_util::description_template;
 use crate::description_util::edit_description;
 use crate::ui::Ui;
@@ -33,7 +36,7 @@ use crate::ui::Ui;
 /// revision. The remaining changes will be put in a new revision on top.
 ///
 /// [diff editor]:
-///     https://martinvonz.github.io/jj/latest/config/#editing-diffs
+///     https://jj-vcs.github.io/jj/latest/config/#editing-diffs
 ///
 /// If the change you split had a description, you will be asked to enter a
 /// change description for each commit. If the change did not have a
@@ -44,23 +47,33 @@ use crate::ui::Ui;
 /// achieved with `jj new`.
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct SplitArgs {
-    /// Interactively choose which parts to split. This is the default if no
-    /// paths are provided.
+    /// Interactively choose which parts to split
+    ///
+    /// This is the default if no filesets are provided.
     #[arg(long, short)]
     interactive: bool,
     /// Specify diff editor to be used (implies --interactive)
     #[arg(long, value_name = "NAME")]
     tool: Option<String>,
     /// The revision to split
-    #[arg(long, short, default_value = "@")]
+    #[arg(
+        long, short,
+        default_value = "@",
+        value_name = "REVSET",
+        add = ArgValueCandidates::new(complete::mutable_revisions)
+    )]
     revision: RevisionArg,
     /// Split the revision into two parallel revisions instead of a parent and
-    /// child.
+    /// child
     // TODO: Delete `--siblings` alias in jj 0.25+
     #[arg(long, short, alias = "siblings")]
     parallel: bool,
-    /// Put these paths in the first commit
-    #[arg(value_hint = clap::ValueHint::AnyPath)]
+    /// Files matching any of these filesets are put in the first commit
+    #[arg(
+        value_name = "FILESETS",
+        value_hint = clap::ValueHint::AnyPath,
+        add = ArgValueCompleter::new(complete::modified_revision_files),
+    )]
     paths: Vec<String>,
 }
 
@@ -125,13 +138,11 @@ The remainder will be in the second commit.
     // Create the first commit, which includes the changes selected by the user.
     let selected_tree = tx.repo().store().get_root_tree(&selected_tree_id)?;
     let first_commit = {
-        let mut commit_builder = tx
-            .repo_mut()
-            .rewrite_commit(command.settings(), &commit)
-            .detach();
+        let mut commit_builder = tx.repo_mut().rewrite_commit(&commit).detach();
         commit_builder.set_tree_id(selected_tree_id);
         if commit_builder.description().is_empty() {
-            commit_builder.set_description(command.settings().default_description());
+            commit_builder
+                .set_description(command.settings().get_string("ui.default-description")?);
         }
         let temp_commit = commit_builder.write_hidden()?;
         let template = description_template(
@@ -165,10 +176,7 @@ The remainder will be in the second commit.
         } else {
             vec![first_commit.id().clone()]
         };
-        let mut commit_builder = tx
-            .repo_mut()
-            .rewrite_commit(command.settings(), &commit)
-            .detach();
+        let mut commit_builder = tx.repo_mut().rewrite_commit(&commit).detach();
         commit_builder
             .set_parents(parents)
             .set_tree_id(new_tree.id())
@@ -205,10 +213,8 @@ The remainder will be in the second commit.
     tx.repo_mut()
         .set_rewritten_commit(commit.id().clone(), second_commit.id().clone());
     let mut num_rebased = 0;
-    tx.repo_mut().transform_descendants(
-        command.settings(),
-        vec![commit.id().clone()],
-        |mut rewriter| {
+    tx.repo_mut()
+        .transform_descendants(vec![commit.id().clone()], |mut rewriter| {
             num_rebased += 1;
             if args.parallel {
                 rewriter
@@ -216,10 +222,9 @@ The remainder will be in the second commit.
             }
             // We don't need to do anything special for the non-parallel case
             // since we already marked the original commit as rewritten.
-            rewriter.rebase(command.settings())?.write()?;
+            rewriter.rebase()?.write()?;
             Ok(())
-        },
-    )?;
+        })?;
 
     if let Some(mut formatter) = ui.status_formatter() {
         if num_rebased > 0 {

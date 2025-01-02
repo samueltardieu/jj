@@ -25,15 +25,15 @@ fn test_templater_parse_error() {
     let repo_path = test_env.env_root().join("repo");
     let render_err = |template| test_env.jj_cmd_failure(&repo_path, &["log", "-T", template]);
 
-    insta::assert_snapshot!(render_err(r#"description ()"#), @r###"
+    insta::assert_snapshot!(render_err(r#"description ()"#), @r#"
     Error: Failed to parse template: Syntax error
     Caused by:  --> 1:13
       |
     1 | description ()
       |             ^---
       |
-      = expected <EOI>, `++`, `||`, or `&&`
-    "###);
+      = expected <EOI>, `++`, `||`, `&&`, `==`, `!=`, `>=`, `>`, `<=`, or `<`
+    "#);
 
     // Typo
     test_env.add_config(
@@ -113,7 +113,7 @@ fn test_templater_parse_error() {
       | ^-----^
       |
       = Keyword "builtin" doesn't exist
-    Hint: Did you mean "builtin_log_comfortable", "builtin_log_compact", "builtin_log_detailed", "builtin_log_node", "builtin_log_node_ascii", "builtin_log_oneline", "builtin_op_log_comfortable", "builtin_op_log_compact", "builtin_op_log_node", "builtin_op_log_node_ascii"?
+    Hint: Did you mean "builtin_log_comfortable", "builtin_log_compact", "builtin_log_compact_full_description", "builtin_log_detailed", "builtin_log_node", "builtin_log_node_ascii", "builtin_log_oneline", "builtin_op_log_comfortable", "builtin_op_log_compact", "builtin_op_log_node", "builtin_op_log_node_ascii"?
     "#);
 }
 
@@ -129,11 +129,12 @@ fn test_template_parse_warning() {
           local_branches,
           remote_branches,
           self.contained_in('branches()'),
+          author.username(),
         )
     "#};
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["log", "-r@", "-T", template]);
     insta::assert_snapshot!(stdout, @r#"
-    @  false
+    @  false test.user
     │
     ~
     "#);
@@ -172,6 +173,13 @@ fn test_template_parse_warning() {
       | ^------^
       |
       = branches() is deprecated; use bookmarks() instead
+    Warning: In template expression
+     --> 6:10
+      |
+    6 |   author.username(),
+      |          ^------^
+      |
+      = username() is deprecated; use email().local() instead
     "#);
 }
 
@@ -429,7 +437,7 @@ fn test_templater_alias_override() {
     "#,
     );
 
-    // 'f(x)' should be overridden by --config-toml 'f(a)'. If aliases were sorted
+    // 'f(x)' should be overridden by --config 'f(a)'. If aliases were sorted
     // purely by name, 'f(a)' would come first.
     let stdout = test_env.jj_cmd_success(
         &repo_path,
@@ -439,8 +447,7 @@ fn test_templater_alias_override() {
             "-r@",
             "-T",
             r#"f(_)"#,
-            "--config-toml",
-            r#"template-aliases.'f(a)' = '"arg"'"#,
+            r#"--config=template-aliases.'f(a)'='"arg"'"#,
         ],
     );
     insta::assert_snapshot!(stdout, @"arg");

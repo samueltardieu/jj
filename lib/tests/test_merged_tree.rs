@@ -57,12 +57,14 @@ fn diff_entry_tuple(diff: TreeDiffEntry) -> (RepoPathBuf, (MergedTreeValue, Merg
 }
 
 fn diff_stream_equals_iter(tree1: &MergedTree, tree2: &MergedTree, matcher: &dyn Matcher) {
-    let iter_diff: Vec<_> = TreeDiffIterator::new(tree1.as_merge(), tree2.as_merge(), matcher)
+    let trees1 = tree1.as_merge();
+    let trees2 = tree2.as_merge();
+    let iter_diff: Vec<_> = TreeDiffIterator::new(trees1, trees2, matcher)
         .map(|diff| (diff.path, diff.values.unwrap()))
         .collect();
     let max_concurrent_reads = 10;
     let stream_diff: Vec<_> =
-        TreeDiffStreamImpl::new(tree1.clone(), tree2.clone(), matcher, max_concurrent_reads)
+        TreeDiffStreamImpl::new(trees1, trees2, matcher, max_concurrent_reads)
             .map(|diff| (diff.path, diff.values.unwrap()))
             .collect()
             .block_on();
@@ -157,14 +159,14 @@ fn test_from_legacy_tree() {
 
     // dir1: directory without conflicts
     let dir1_basename = RepoPathComponent::new("dir1");
-    let dir1_filename = &RepoPath::root()
+    let dir1_filename = RepoPath::root()
         .join(dir1_basename)
         .join(RepoPathComponent::new("file"));
-    let dir1_filename_id = write_file(store.as_ref(), dir1_filename, "file5_v2");
-    tree_builder.set(dir1_filename.to_owned(), file_value(&dir1_filename_id));
+    let dir1_filename_id = write_file(store.as_ref(), &dir1_filename, "file5_v2");
+    tree_builder.set(dir1_filename.clone(), file_value(&dir1_filename_id));
 
     let tree_id = tree_builder.write_tree().unwrap();
-    let tree = store.get_tree(RepoPath::root(), &tree_id).unwrap();
+    let tree = store.get_tree(RepoPathBuf::root(), &tree_id).unwrap();
 
     let merged_tree = MergedTree::from_legacy_tree(tree.clone()).unwrap();
     assert_eq!(
@@ -269,7 +271,7 @@ fn test_from_legacy_tree() {
     tree_builder.set_or_remove(file3_path.to_owned(), file3_conflict);
     tree_builder.set_or_remove(file4_path.to_owned(), file4_conflict);
     tree_builder.set_or_remove(
-        dir1_filename.to_owned(),
+        dir1_filename.clone(),
         Merge::normal(file_value(&dir1_filename_id)),
     );
     let recreated_merged_id = tree_builder.write_tree(store).unwrap();
@@ -638,7 +640,10 @@ fn test_conflict_iterator() {
         vec![base1.clone()],
         vec![side1.clone(), side2.clone()],
     ));
-    let conflicts = tree.conflicts().collect_vec();
+    let conflicts = tree
+        .conflicts()
+        .map(|(path, conflict)| (path, conflict.unwrap()))
+        .collect_vec();
     let conflict_at = |path: &RepoPath| {
         Merge::from_removes_adds(
             vec![base1.path_value(path).unwrap()],
@@ -672,7 +677,10 @@ fn test_conflict_iterator() {
 
     // After we resolve conflicts, there are only non-trivial conflicts left
     let tree = tree.resolve().unwrap();
-    let conflicts = tree.conflicts().collect_vec();
+    let conflicts = tree
+        .conflicts()
+        .map(|(path, conflict)| (path, conflict.unwrap()))
+        .collect_vec();
     assert_eq!(
         conflicts,
         vec![
@@ -725,7 +733,10 @@ fn test_conflict_iterator_higher_arity() {
         vec![base1.clone(), base2.clone()],
         vec![side1.clone(), side2.clone(), side3.clone()],
     ));
-    let conflicts = tree.conflicts().collect_vec();
+    let conflicts = tree
+        .conflicts()
+        .map(|(path, conflict)| (path, conflict.unwrap()))
+        .collect_vec();
     let conflict_at = |path: &RepoPath| {
         Merge::from_removes_adds(
             vec![

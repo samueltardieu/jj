@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use clap_complete::ArgValueCandidates;
 use itertools::Itertools as _;
 
 use super::find_remote_bookmarks;
@@ -22,6 +23,7 @@ use crate::cli_util::RemoteBookmarkNamePattern;
 use crate::command_error::CommandError;
 use crate::commit_templater::CommitTemplateLanguage;
 use crate::commit_templater::RefName;
+use crate::complete;
 use crate::ui::Ui;
 
 /// Start tracking given remote bookmarks
@@ -35,10 +37,14 @@ pub struct BookmarkTrackArgs {
     ///
     /// By default, the specified name matches exactly. Use `glob:` prefix to
     /// select bookmarks by wildcard pattern. For details, see
-    /// https://martinvonz.github.io/jj/latest/revsets/#string-patterns.
+    /// https://jj-vcs.github.io/jj/latest/revsets/#string-patterns.
     ///
     /// Examples: bookmark@remote, glob:main@*, glob:jjfan-*@upstream
-    #[arg(required = true, value_name = "BOOKMARK@REMOTE")]
+    #[arg(
+        required = true,
+        value_name = "BOOKMARK@REMOTE",
+        add = ArgValueCandidates::new(complete::untracked_bookmarks),
+    )]
     names: Vec<RemoteBookmarkNamePattern>,
 }
 
@@ -84,7 +90,6 @@ pub fn cmd_bookmark_track(
             let language = workspace_command.commit_template_language();
             let text = command
                 .settings()
-                .config()
                 .get::<String>("templates.bookmark_list")?;
             workspace_command
                 .parse_template(ui, &language, &text, CommitTemplateLanguage::wrap_ref_name)?

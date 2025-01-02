@@ -38,7 +38,7 @@ use crate::ui::Ui;
 /// commit. This is true in general; it is not specific to this command.
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct UnsquashArgs {
-    #[arg(long, short, default_value = "@")]
+    #[arg(long, short, default_value = "@", value_name = "REVSET")]
     revision: RevisionArg,
     /// Interactively choose which parts to unsquash
     // TODO: It doesn't make much sense to run this without -i. We should make that
@@ -124,20 +124,20 @@ aborted.
         )?;
         // Commit the new child on top of the parent's parents.
         tx.repo_mut()
-            .rewrite_commit(command.settings(), &commit)
+            .rewrite_commit(&commit)
             .set_parents(parent.parent_ids().to_vec())
             .set_description(description)
             .write()?;
     } else {
         let new_parent = tx
             .repo_mut()
-            .rewrite_commit(command.settings(), &parent)
+            .rewrite_commit(&parent)
             .set_tree_id(new_parent_tree_id)
             .set_predecessors(vec![parent.id().clone(), commit.id().clone()])
             .write()?;
         // Commit the new child on top of the new parent.
         tx.repo_mut()
-            .rewrite_commit(command.settings(), &commit)
+            .rewrite_commit(&commit)
             .set_parents(vec![new_parent.id().clone()])
             .write()?;
     }

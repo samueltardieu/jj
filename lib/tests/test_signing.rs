@@ -1,6 +1,8 @@
 use jj_lib::backend::MillisSinceEpoch;
 use jj_lib::backend::Signature;
 use jj_lib::backend::Timestamp;
+use jj_lib::config::ConfigLayer;
+use jj_lib::config::ConfigSource;
 use jj_lib::repo::Repo;
 use jj_lib::settings::UserSettings;
 use jj_lib::signing::SigStatus;
@@ -15,19 +17,20 @@ use testutils::TestRepoBackend;
 use testutils::TestWorkspace;
 
 fn user_settings(sign_all: bool) -> UserSettings {
-    let config = testutils::base_config()
-        .add_source(config::File::from_str(
+    let mut config = testutils::base_user_config();
+    config.add_layer(
+        ConfigLayer::parse(
+            ConfigSource::User,
             &format!(
                 r#"
                 signing.key = "impeccable"
                 signing.sign-all = {sign_all}
                 "#
             ),
-            config::FileFormat::Toml,
-        ))
-        .build()
-        .unwrap();
-    UserSettings::from_config(config)
+        )
+        .unwrap(),
+    );
+    UserSettings::from_config(config).unwrap()
 }
 
 fn someone_else() -> Signature {
@@ -59,19 +62,18 @@ fn manual(backend: TestRepoBackend) {
 
     let repo = &test_workspace.repo;
 
-    let settings = settings.clone();
     let repo = repo.clone();
-    let mut tx = repo.start_transaction(&settings);
-    let commit1 = create_random_commit(tx.repo_mut(), &settings)
+    let mut tx = repo.start_transaction();
+    let commit1 = create_random_commit(tx.repo_mut())
         .set_sign_behavior(SignBehavior::Own)
         .write()
         .unwrap();
-    let commit2 = create_random_commit(tx.repo_mut(), &settings)
+    let commit2 = create_random_commit(tx.repo_mut())
         .set_sign_behavior(SignBehavior::Own)
         .set_author(someone_else())
         .write()
         .unwrap();
-    tx.commit("test");
+    tx.commit("test").unwrap();
 
     let commit1 = repo.store().get_commit(commit1.id()).unwrap();
     assert_eq!(commit1.verification().unwrap(), good_verification());
@@ -89,18 +91,17 @@ fn keep_on_rewrite(backend: TestRepoBackend) {
 
     let repo = &test_workspace.repo;
 
-    let settings = settings.clone();
     let repo = repo.clone();
-    let mut tx = repo.start_transaction(&settings);
-    let commit = create_random_commit(tx.repo_mut(), &settings)
+    let mut tx = repo.start_transaction();
+    let commit = create_random_commit(tx.repo_mut())
         .set_sign_behavior(SignBehavior::Own)
         .write()
         .unwrap();
-    tx.commit("test");
+    tx.commit("test").unwrap();
 
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     let mut_repo = tx.repo_mut();
-    let rewritten = mut_repo.rewrite_commit(&settings, &commit).write().unwrap();
+    let rewritten = mut_repo.rewrite_commit(&commit).write().unwrap();
 
     let commit = repo.store().get_commit(rewritten.id()).unwrap();
     assert_eq!(commit.verification().unwrap(), good_verification());
@@ -115,19 +116,18 @@ fn manual_drop_on_rewrite(backend: TestRepoBackend) {
 
     let repo = &test_workspace.repo;
 
-    let settings = settings.clone();
     let repo = repo.clone();
-    let mut tx = repo.start_transaction(&settings);
-    let commit = create_random_commit(tx.repo_mut(), &settings)
+    let mut tx = repo.start_transaction();
+    let commit = create_random_commit(tx.repo_mut())
         .set_sign_behavior(SignBehavior::Own)
         .write()
         .unwrap();
-    tx.commit("test");
+    tx.commit("test").unwrap();
 
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     let mut_repo = tx.repo_mut();
     let rewritten = mut_repo
-        .rewrite_commit(&settings, &commit)
+        .rewrite_commit(&commit)
         .set_sign_behavior(SignBehavior::Drop)
         .write()
         .unwrap();
@@ -145,15 +145,14 @@ fn forced(backend: TestRepoBackend) {
 
     let repo = &test_workspace.repo;
 
-    let settings = settings.clone();
     let repo = repo.clone();
-    let mut tx = repo.start_transaction(&settings);
-    let commit = create_random_commit(tx.repo_mut(), &settings)
+    let mut tx = repo.start_transaction();
+    let commit = create_random_commit(tx.repo_mut())
         .set_sign_behavior(SignBehavior::Force)
         .set_author(someone_else())
         .write()
         .unwrap();
-    tx.commit("test");
+    tx.commit("test").unwrap();
 
     let commit = repo.store().get_commit(commit.id()).unwrap();
     assert_eq!(commit.verification().unwrap(), good_verification());
@@ -168,11 +167,10 @@ fn configured(backend: TestRepoBackend) {
 
     let repo = &test_workspace.repo;
 
-    let settings = settings.clone();
     let repo = repo.clone();
-    let mut tx = repo.start_transaction(&settings);
-    let commit = write_random_commit(tx.repo_mut(), &settings);
-    tx.commit("test");
+    let mut tx = repo.start_transaction();
+    let commit = write_random_commit(tx.repo_mut());
+    tx.commit("test").unwrap();
 
     let commit = repo.store().get_commit(commit.id()).unwrap();
     assert_eq!(commit.verification().unwrap(), good_verification());

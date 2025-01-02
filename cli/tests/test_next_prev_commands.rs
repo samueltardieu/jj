@@ -870,7 +870,7 @@ fn test_next_conflict_head() {
     let stderr = test_env.jj_cmd_failure(&repo_path, &["next", "--conflict", "--edit"]);
     insta::assert_snapshot!(stderr, @r###"
     Error: The working copy has no descendants with conflicts
-    Hint: Working copy: rlvkpnrz da992bf2 (conflict) (no description set)
+    Hint: Working copy: rlvkpnrz 0273eeab (conflict) (no description set)
     "###);
 }
 
@@ -1125,17 +1125,17 @@ fn test_next_offset_when_wc_has_descendants() {
     test_env.jj_cmd_ok(&repo_path, &["commit", "-m", "left-2"]);
 
     test_env.jj_cmd_ok(&repo_path, &["edit", "description(right-wc)"]);
-    insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
-    ○  vruxwmqvtpmx left-2
-    ○  yqosqzytrlsw left-1
-    ○  royxmykxtrkr left-wc
-    │ ○  zsuskulnrvyr right-2
-    │ ○  kkmpptxzrspx right-1
-    │ @  rlvkpnrzqnoo right-wc
+    insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r#"
+    ○  zsuskulnrvyr right-2
+    ○  kkmpptxzrspx right-1
+    @  rlvkpnrzqnoo right-wc
+    │ ○  vruxwmqvtpmx left-2
+    │ ○  yqosqzytrlsw left-1
+    │ ○  royxmykxtrkr left-wc
     ├─╯
     ○  qpvuntsmwlqt base
     ◆  zzzzzzzzzzzz
-    "###);
+    "#);
 
     test_env.jj_cmd_ok(&repo_path, &["next", "2"]);
     insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"

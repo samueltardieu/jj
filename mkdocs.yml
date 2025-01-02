@@ -2,7 +2,7 @@ site_name: Jujutsu docs
 site_dir:  'rendered-docs'
 # Not having this (or viewing the site locally, or from any place other than the
 # site_url) leads to version switching failing to preserve the current path.
-site_url: !ENV [SITE_URL_FOR_MKDOCS, 'https://martinvonz.github.io/jj/']
+site_url: !ENV [SITE_URL_FOR_MKDOCS, 'https://jj-vcs.github.io/jj/']
 theme:
   name: 'material'
   language: 'en'
@@ -134,10 +134,11 @@ nav:
       - 'Temporary Voting for Governance': 'governance/temporary-voting.md'
 
 - 'Design docs':
-    - 'Roadmap': "roadmap.md"
     - 'git-submodules': 'design/git-submodules.md'
     - 'git-submodule-storage': 'design/git-submodule-storage.md'
     - 'JJ run': 'design/run.md'
     - 'Sparse Patterns v2': 'design/sparse-v2.md'
     - 'Tracking branches': 'design/tracking-branches.md'
     - 'Copy tracking and tracing': 'design/copy-tracking.md'
+
+- 'Development Roadmap': "roadmap.md"

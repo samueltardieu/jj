@@ -14,11 +14,28 @@
 
 #![allow(missing_docs)]
 
-#[cfg_attr(unix, path = "lock/unix.rs")]
-#[cfg_attr(not(unix), path = "lock/fallback.rs")]
-mod platform;
+mod fallback;
+#[cfg(unix)]
+mod unix;
 
-pub use platform::FileLock;
+use std::io;
+use std::path::PathBuf;
+
+use thiserror::Error;
+
+#[cfg(not(unix))]
+pub use self::fallback::FileLock;
+#[cfg(unix)]
+pub use self::unix::FileLock;
+
+#[derive(Debug, Error)]
+#[error("{message}: {path}")]
+pub struct FileLockError {
+    pub message: &'static str,
+    pub path: PathBuf,
+    #[source]
+    pub err: io::Error,
+}
 
 #[cfg(test)]
 mod tests {
@@ -27,22 +44,26 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    use test_case::test_case;
+
     use super::*;
 
-    #[test]
-    fn lock_basic() {
+    #[test_case(FileLock::lock)]
+    #[cfg_attr(unix, test_case(fallback::FileLock::lock))]
+    fn lock_basic<T>(lock_fn: fn(PathBuf) -> Result<T, FileLockError>) {
         let temp_dir = testutils::new_temp_dir();
         let lock_path = temp_dir.path().join("test.lock");
         assert!(!lock_path.exists());
         {
-            let _lock = FileLock::lock(lock_path.clone());
+            let _lock = lock_fn(lock_path.clone()).unwrap();
             assert!(lock_path.exists());
         }
         assert!(!lock_path.exists());
     }
 
-    #[test]
-    fn lock_concurrent() {
+    #[test_case(FileLock::lock)]
+    #[cfg_attr(unix, test_case(fallback::FileLock::lock))]
+    fn lock_concurrent<T>(lock_fn: fn(PathBuf) -> Result<T, FileLockError>) {
         let temp_dir = testutils::new_temp_dir();
         let data_path = temp_dir.path().join("test");
         let lock_path = temp_dir.path().join("test.lock");
@@ -51,7 +72,7 @@ mod tests {
         thread::scope(|s| {
             for _ in 0..num_threads {
                 s.spawn(|| {
-                    let _lock = FileLock::lock(lock_path.clone());
+                    let _lock = lock_fn(lock_path.clone()).unwrap();
                     let data = fs::read(&data_path).unwrap();
                     let value = u32::from_le_bytes(data.try_into().unwrap());
                     thread::sleep(Duration::from_millis(1));

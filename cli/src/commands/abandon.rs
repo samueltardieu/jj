@@ -14,6 +14,7 @@
 
 use std::io::Write;
 
+use clap_complete::ArgValueCandidates;
 use itertools::Itertools as _;
 use jj_lib::commit::CommitIteratorExt;
 use jj_lib::object_id::ObjectId;
@@ -22,6 +23,7 @@ use tracing::instrument;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
 use crate::command_error::CommandError;
+use crate::complete;
 use crate::ui::Ui;
 
 /// Abandon a revision
@@ -34,15 +36,17 @@ use crate::ui::Ui;
 /// commit. This is true in general; it is not specific to this command.
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct AbandonArgs {
-    /// The revision(s) to abandon
-    #[arg(default_value = "@")]
-    revisions: Vec<RevisionArg>,
+    /// The revision(s) to abandon (default: @)
+    #[arg(
+        value_name = "REVSETS",
+        add = ArgValueCandidates::new(complete::mutable_revisions)
+    )]
+    revisions_pos: Vec<RevisionArg>,
+    #[arg(short = 'r', hide = true, value_name = "REVSETS")]
+    revisions_opt: Vec<RevisionArg>,
     /// Do not print every abandoned commit on a separate line
     #[arg(long, short)]
     summary: bool,
-    /// Ignored (but lets you pass `-r` for consistency with other commands)
-    #[arg(short = 'r', hide = true, action = clap::ArgAction::Count)]
-    unused_revision: u8,
     /// Do not modify the content of the children of the abandoned commits
     #[arg(long)]
     restore_descendants: bool,
@@ -55,10 +59,14 @@ pub(crate) fn cmd_abandon(
     args: &AbandonArgs,
 ) -> Result<(), CommandError> {
     let mut workspace_command = command.workspace_helper(ui)?;
-    let to_abandon: Vec<_> = workspace_command
-        .parse_union_revsets(ui, &args.revisions)?
-        .evaluate_to_commits()?
-        .try_collect()?;
+    let to_abandon: Vec<_> = if !args.revisions_pos.is_empty() || !args.revisions_opt.is_empty() {
+        workspace_command
+            .parse_union_revsets(ui, &[&*args.revisions_pos, &*args.revisions_opt].concat())?
+    } else {
+        workspace_command.parse_revset(ui, &RevisionArg::AT)?
+    }
+    .evaluate_to_commits()?
+    .try_collect()?;
     if to_abandon.is_empty() {
         writeln!(ui.status(), "No revisions to abandon.")?;
         return Ok(());
@@ -71,11 +79,11 @@ pub(crate) fn cmd_abandon(
     }
     let (num_rebased, extra_msg) = if args.restore_descendants {
         (
-            tx.repo_mut().reparent_descendants(command.settings())?,
+            tx.repo_mut().reparent_descendants()?,
             " (while preserving their content)",
         )
     } else {
-        (tx.repo_mut().rebase_descendants(command.settings())?, "")
+        (tx.repo_mut().rebase_descendants()?, "")
     };
 
     if let Some(mut formatter) = ui.status_formatter() {

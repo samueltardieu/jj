@@ -31,13 +31,12 @@ use testutils::TestRepoBackend;
 
 #[test]
 fn test_id_prefix() {
-    let settings = testutils::user_settings();
     let test_repo = TestRepo::init_with_backend(TestRepoBackend::Git);
     let repo = &test_repo.repo;
     let root_commit_id = repo.store().root_commit_id();
     let root_change_id = repo.store().root_change_id();
 
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     let mut create_commit = |parent_id: &CommitId| {
         let signature = Signature {
             name: "Some One".to_string(),
@@ -48,11 +47,7 @@ fn test_id_prefix() {
             },
         };
         tx.repo_mut()
-            .new_commit(
-                &settings,
-                vec![parent_id.clone()],
-                repo.store().empty_merged_tree_id(),
-            )
+            .new_commit(vec![parent_id.clone()], repo.store().empty_merged_tree_id())
             .set_author(signature.clone())
             .set_committer(signature)
             .write()
@@ -62,7 +57,7 @@ fn test_id_prefix() {
     for _ in 0..25 {
         commits.push(create_commit(commits.last().unwrap().id()));
     }
-    let repo = tx.commit("test");
+    let repo = tx.commit("test").unwrap();
 
     // Print the commit IDs and change IDs for reference
     let commit_prefixes = commits
@@ -259,12 +254,11 @@ fn test_id_prefix() {
 
 #[test]
 fn test_id_prefix_divergent() {
-    let settings = testutils::user_settings();
     let test_repo = TestRepo::init_with_backend(TestRepoBackend::Git);
     let repo = &test_repo.repo;
     let root_commit_id = repo.store().root_commit_id();
 
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     let mut create_commit_with_change_id =
         |parent_id: &CommitId, description: &str, change_id: ChangeId| {
             let signature = Signature {
@@ -276,11 +270,7 @@ fn test_id_prefix_divergent() {
                 },
             };
             tx.repo_mut()
-                .new_commit(
-                    &settings,
-                    vec![parent_id.clone()],
-                    repo.store().empty_merged_tree_id(),
-                )
+                .new_commit(vec![parent_id.clone()], repo.store().empty_merged_tree_id())
                 .set_description(description)
                 .set_author(signature.clone())
                 .set_committer(signature)
@@ -302,7 +292,7 @@ fn test_id_prefix_divergent() {
         second_commit.clone(),
         third_commit_divergent_with_second.clone(),
     ];
-    let repo = tx.commit("test");
+    let repo = tx.commit("test").unwrap();
 
     // Print the commit IDs and change IDs for reference
     let change_prefixes = commits
@@ -398,12 +388,11 @@ fn test_id_prefix_divergent() {
 
 #[test]
 fn test_id_prefix_hidden() {
-    let settings = testutils::user_settings();
     let test_repo = TestRepo::init_with_backend(TestRepoBackend::Git);
     let repo = &test_repo.repo;
     let root_commit_id = repo.store().root_commit_id();
 
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     let mut commits = vec![];
     for i in 0..10 {
         let signature = Signature {
@@ -417,7 +406,6 @@ fn test_id_prefix_hidden() {
         let commit = tx
             .repo_mut()
             .new_commit(
-                &settings,
                 vec![root_commit_id.clone()],
                 repo.store().empty_merged_tree_id(),
             )
@@ -469,8 +457,8 @@ fn test_id_prefix_hidden() {
     let hidden_commit = &commits[8];
     tx.repo_mut()
         .record_abandoned_commit(hidden_commit.id().clone());
-    tx.repo_mut().rebase_descendants(&settings).unwrap();
-    let repo = tx.commit("test");
+    tx.repo_mut().rebase_descendants().unwrap();
+    let repo = tx.commit("test").unwrap();
 
     let prefix = |x: &str| HexPrefix::new(x).unwrap();
 

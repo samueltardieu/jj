@@ -12,16 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use clap_complete::ArgValueCandidates;
+use clap_complete::ArgValueCompleter;
 use jj_lib::annotate::get_annotation_for_file;
-use jj_lib::annotate::AnnotateResults;
+use jj_lib::annotate::FileAnnotation;
 use jj_lib::commit::Commit;
 use jj_lib::repo::Repo;
+use jj_lib::revset::RevsetExpression;
 use tracing::instrument;
 
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
 use crate::command_error::user_error;
 use crate::command_error::CommandError;
+use crate::complete;
 use crate::templater::TemplateRenderer;
 use crate::ui::Ui;
 
@@ -34,10 +38,18 @@ use crate::ui::Ui;
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct FileAnnotateArgs {
     /// the file to annotate
-    #[arg(value_hint = clap::ValueHint::AnyPath)]
+    #[arg(
+        value_hint = clap::ValueHint::AnyPath,
+        add = ArgValueCompleter::new(complete::all_revision_files),
+    )]
     path: String,
     /// an optional revision to start at
-    #[arg(long, short)]
+    #[arg(
+        long,
+        short,
+        value_name = "REVSET",
+        add = ArgValueCandidates::new(complete::all_revisions)
+    )]
     revision: Option<RevisionArg>,
 }
 
@@ -65,25 +77,30 @@ pub(crate) fn cmd_file_annotate(
 
     let annotate_commit_summary_text = command
         .settings()
-        .config()
         .get_string("templates.annotate_commit_summary")?;
     let template = workspace_command.parse_commit_template(ui, &annotate_commit_summary_text)?;
 
-    let annotations = get_annotation_for_file(repo.as_ref(), &starting_commit, &file_path)?;
+    // TODO: Should we add an option to limit the domain to e.g. recent commits?
+    // Note that this is probably different from "--skip REVS", which won't
+    // exclude the revisions, but will ignore diffs in those revisions as if
+    // ancestor revisions had new content.
+    let domain = RevsetExpression::all();
+    let annotation = get_annotation_for_file(repo.as_ref(), &starting_commit, &domain, &file_path)?;
 
-    render_annotations(repo.as_ref(), ui, &template, &annotations)?;
+    render_file_annotation(repo.as_ref(), ui, &template, &annotation)?;
     Ok(())
 }
 
-fn render_annotations(
+fn render_file_annotation(
     repo: &dyn Repo,
     ui: &mut Ui,
     template_render: &TemplateRenderer<Commit>,
-    results: &AnnotateResults,
+    annotation: &FileAnnotation,
 ) -> Result<(), CommandError> {
     ui.request_pager();
     let mut formatter = ui.stdout_formatter();
-    for (line_no, (commit_id, line)) in results.file_annotations.iter().enumerate() {
+    for (line_no, (commit_id, line)) in annotation.lines().enumerate() {
+        let commit_id = commit_id.expect("should reached to the empty ancestor");
         let commit = repo.store().get_commit(commit_id)?;
         template_render.format(&commit, formatter.as_mut())?;
         write!(formatter, " {:>4}: ", line_no + 1)?;

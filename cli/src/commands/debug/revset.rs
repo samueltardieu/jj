@@ -15,6 +15,7 @@
 use std::fmt::Debug;
 use std::io::Write as _;
 
+use jj_lib::object_id::ObjectId;
 use jj_lib::revset;
 use jj_lib::revset::RevsetDiagnostics;
 
@@ -46,11 +47,6 @@ pub fn cmd_debug_revset(
     writeln!(ui.stdout(), "{expression:#?}")?;
     writeln!(ui.stdout())?;
 
-    let expression = revset::optimize(expression);
-    writeln!(ui.stdout(), "-- Optimized:")?;
-    writeln!(ui.stdout(), "{expression:#?}")?;
-    writeln!(ui.stdout())?;
-
     let symbol_resolver = revset_util::default_symbol_resolver(
         repo,
         command.revset_extensions().symbol_resolvers(),
@@ -61,14 +57,24 @@ pub fn cmd_debug_revset(
     writeln!(ui.stdout(), "{expression:#?}")?;
     writeln!(ui.stdout())?;
 
-    let revset = expression.evaluate(repo)?;
+    let expression = revset::optimize(expression);
+    writeln!(ui.stdout(), "-- Optimized:")?;
+    writeln!(ui.stdout(), "{expression:#?}")?;
+    writeln!(ui.stdout())?;
+
+    let backend_expression = expression.to_backend_expression(repo);
+    writeln!(ui.stdout(), "-- Backend:")?;
+    writeln!(ui.stdout(), "{backend_expression:#?}")?;
+    writeln!(ui.stdout())?;
+
+    let revset = expression.evaluate_unoptimized(repo)?;
     writeln!(ui.stdout(), "-- Evaluated:")?;
     writeln!(ui.stdout(), "{revset:#?}")?;
     writeln!(ui.stdout())?;
 
     writeln!(ui.stdout(), "-- Commit IDs:")?;
     for commit_id in revset.iter() {
-        writeln!(ui.stdout(), "{commit_id}")?;
+        writeln!(ui.stdout(), "{}", commit_id?.hex())?;
     }
     Ok(())
 }

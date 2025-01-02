@@ -135,6 +135,11 @@ parent.
       <td><code>git push &lt;remote&gt; &lt;bookmark name&gt;</code></td>
     </tr>
     <tr>
+      <td>Add a remote target to the repo</td>
+      <td><code>jj git remote add &lt;remote&gt; &lt;url&gt;</code></td>
+      <td><code>git remote add &lt;remote&gt; &lt;url&gt;</code></td>
+    </tr>
+    <tr>
       <td>Show summary of current work and repo status</td>
       <td><code>jj st</code></td>
       <td><code>git status</code></td>
@@ -239,8 +244,7 @@ parent.
     <tr>
       <td>Edit description (commit message) of the previous change</td>
       <td><code>jj describe @-</code></td>
-      <td><code>git commit --amend</code> (first make sure that nothing is
-          staged)</td>
+      <td><code>git commit --amend --only</code></td>
     </tr>
     <tr>
       <td>Temporarily put away the current change</td>
@@ -320,8 +324,7 @@ parent.
     </tr>
     <tr>
       <td>Create a copy of a commit on top of another commit</td>
-      <td><code>jj duplicate &lt;source&gt;; jj rebase -r &lt;duplicate commit&gt; -d &lt;destination&gt;</code>
-          (there's no single command for it yet)</td>
+      <td><code>jj duplicate &lt;source&gt;; -d &lt;destination&gt;</code></td>
       <td><code>git co &lt;destination&gt;; git cherry-pick &lt;source&gt;</code></td>
     </tr>
     <tr>
@@ -372,6 +375,12 @@ parent.
       <td><code>jj backout -r &lt;revision&gt;</code>
       </td>
       <td><code>git revert &lt;revision&gt;</code></td>
+    </tr>
+    <tr>
+      <td>Show what revision and author last modified each line of a file</td>
+      <td><code>jj file annotate &lt;path&gt;</code>
+      </td>
+      <td><code>git blame &lt;file&gt;</code></td>
     </tr>
   </tbody>
 </table>

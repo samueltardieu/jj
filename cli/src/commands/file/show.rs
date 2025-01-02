@@ -15,6 +15,8 @@
 use std::io;
 use std::io::Write;
 
+use clap_complete::ArgValueCandidates;
+use clap_complete::ArgValueCompleter;
 use jj_lib::backend::BackendResult;
 use jj_lib::conflicts::materialize_merge_result;
 use jj_lib::conflicts::materialize_tree_value;
@@ -33,6 +35,7 @@ use crate::cli_util::RevisionArg;
 use crate::cli_util::WorkspaceCommandHelper;
 use crate::command_error::user_error;
 use crate::command_error::CommandError;
+use crate::complete;
 use crate::ui::Ui;
 
 /// Print contents of files in a revision
@@ -42,10 +45,20 @@ use crate::ui::Ui;
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct FileShowArgs {
     /// The revision to get the file contents from
-    #[arg(long, short, default_value = "@")]
+    #[arg(
+        long, short,
+        default_value = "@",
+        value_name = "REVSET",
+        add = ArgValueCandidates::new(complete::all_revisions),
+    )]
     revision: RevisionArg,
     /// Paths to print
-    #[arg(required = true, value_hint = clap::ValueHint::FilePath)]
+    #[arg(
+        required = true,
+        value_name = "FILESETS",
+        value_hint = clap::ValueHint::FilePath,
+        add = ArgValueCompleter::new(complete::all_revision_files),
+    )]
     paths: Vec<String>,
 }
 
@@ -121,7 +134,11 @@ fn write_tree_entries<P: AsRef<RepoPath>>(
                 io::copy(&mut reader, &mut ui.stdout_formatter().as_mut())?;
             }
             MaterializedTreeValue::FileConflict { contents, .. } => {
-                materialize_merge_result(&contents, &mut ui.stdout_formatter())?;
+                materialize_merge_result(
+                    &contents,
+                    workspace_command.env().conflict_marker_style(),
+                    &mut ui.stdout_formatter(),
+                )?;
             }
             MaterializedTreeValue::OtherConflict { id } => {
                 ui.stdout_formatter().write_all(id.describe().as_bytes())?;

@@ -5,7 +5,7 @@
 If you're familiar with Git, you might expect the current bookmark to move forward
 when you commit. However, Jujutsu does not have a concept of a "current bookmark".
 
-To move bookmarks, use `jj bookmark set`.
+To move bookmarks, use `jj bookmark move`.
 
 ### I made a commit and `jj git push --all` says "Nothing changed" instead of pushing it. What do I do?
 
@@ -37,6 +37,23 @@ See [revsets] and [templates] for further guidance.
 
 Use `jj log -r ..`. The `..` [operator] lists all visible commits in the repo, excluding the root (which is never interesting and is shared by all repos).
 
+### Can I monitor how `jj log` evolves?
+
+The simplest way to monitor how the history as shown by `jj log` evolves is by using the [watch(1)](https://man7.org/linux/man-pages/man1/watch.1.html) command (or [hwatch](https://github.com/blacknon/hwatch?tab=readme-ov-file#configuration) or [viddy](https://github.com/sachaos/viddy)).
+For example:
+
+```sh
+watch --color jj --ignore-working-copy log --color=always
+```
+
+This will continuously update the (colored) log output in the terminal.
+The `--ignore-working-copy` option avoids conflicts with manual operations during the creation of snapshots.
+Martin used watch in a [tmux](https://github.com/tmux/tmux/wiki) pane during his presentation [Jujutsu - A Git-compatible VCS](https://www.youtube.com/watch?v=LV0JzI8IcCY).
+
+Alternatively, you can use [jj-fzf](https://github.com/tim-janik/jj-fzf), where the central piece is the `jj log` view and common operations can be carried out via key bindings while the log view updates.
+
+The wiki lists additional TUIs and GUIs beyond the terminal: [GUI-and-TUI](https://github.com/jj-vcs/jj/wiki/GUI-and-TUI)
+
 ### Should I co-locate my repository?
 
 Co-locating a Jujutsu repository allows you to use both Jujutsu and Git in the
@@ -61,7 +78,7 @@ important ones are:
   and ignore the confusing information such tools present for conflicted commits
   (unless you are curious about [the details of how `jj` stores
   conflicts](technical/conflicts.md)). See
-  [\#3979](https://github.com/martinvonz/jj/issues/3979) for plans to improve
+  [\#3979](https://github.com/jj-vcs/jj/issues/3979) for plans to improve
   this situation.
 
 - Jujutsu commands may be a little slower in very large repositories due to
@@ -219,16 +236,21 @@ Now you're ready to work:
 - The private commit _wwwwwwww_ is the second parent of the merge commit.
 - The working copy (_vvvvvvvv_) contains changes from both.
 
-As you work, squash your changes using `jj squash --into xxxxxxxx`. Or you can
-keep your changes in a separate commit without the private commit _wwwwwwww_ as a
-parent:
+As you work, squash your changes using `jj squash --into xxxxxxxx`.
+
+If you need a new empty commit on top of `xxxxxxxx` you can use the
+`--insert-after` and `--insert-before` options (`-A` and `-B` for short):
 
 ```shell
-# Remove the private commit as a parent
-$ jj rebase -r vvvvvvvv -d xxxxxxxx
+# Insert a new commit after xxxxxxxx
+$ jj new --no-edit -A xxxxxxxx -m "Another feature"
+Working copy now at: uuuuuuuu 1c3cff09 (empty) Another feature
+Parent commit      : xxxxxxxx ef612875 Add new feature
 
-# Create a new merge commit to work in
-$ jj new vvvvvvvv wwwwwwww
+# Insert a new commit between yyyyyyyy and vvvvvvvv
+$ jj new --no-edit -A yyyyyyyy -B vvvvvvvv -m "Yet another feature"
+Working copy now at: tttttttt 938ab831 (empty) Yet another feature
+Parent commit      : yyyyyyyy b624cf12 Existing work
 ```
 
 To avoid pushing change _wwwwwwww_ by mistake, use the configuration
@@ -263,6 +285,24 @@ your edits, then use `jj squash` to update the earlier revision with those edits
 For when you would use git stashing, use `jj edit <rev>` for expected behaviour.
 Other workflows may prefer `jj edit` as well.
 
+### Why are most merge commits marked as "(empty)"?
+
+Jujutsu, like Git, is a snapshot-based VCS. That means that each commit
+logically records the state of all current files in the repo. The changes in a
+commit are not recorded but are instead calculated when needed by comparing the
+commit's state to the parent commit's state. Jujutsu defines the changes in a
+commit to be relative to the auto-merged parents (if there's only one parent,
+then that merge is trivial - it's the parent commit's state). As a result, a
+merge commit that was a clean merge (no conflict resolution, no additional
+changes) is considered empty. Conversely, if the merge commit contains conflict
+resolutions or additional changes, then it will be considered non-empty.
+
+This definition of the changes in a commit is used throughout Jujutsu. It's
+used by `jj diff -r` and `jj log -p` to show the changes in a commit. It's used
+by `jj rebase` to rebase the changes in a commit. It's used in `jj log` to
+indicate which commits are empty. It's used in the `files()` revset function
+(and by `jj log <path>`) to find commits that modify a certain path. And so on.
+
 ### How do I deal with divergent changes ('??' after the [change ID])?
 
 A [divergent change][glossary_divergent_change] represents a change that has two
@@ -277,7 +317,7 @@ of them before abandoning it.
 A [conflicted bookmark][bookmarks_conflicts] is a bookmark that refers to multiple
 different commits because jj couldn't fully resolve its desired position.
 Resolving conflicted bookmarks is usually done by setting the bookmark to the
-correct commit using `jj bookmark set <commit ID>`.
+correct commit using `jj bookmark move <name> --to <commit ID>`.
 
 Usually, the different commits associated with the conflicted bookmark should all
 appear in the log, but if they don't you can use `jj bookmark list`to show all the
@@ -300,6 +340,20 @@ directory.
 
 We hope to integrate with Gerrit natively in the future.
 
+### I want to write a tool which integrates with Jujutsu. Should I use the library or parse the CLI?
+
+There are some trade-offs and there is no definitive answer yet.
+
+* Using `jj-lib` avoids parsing command output and makes error handling easier.
+* `jj-lib` is not a stable API, so you may have to make changes to your tool
+when the API changes.
+* The CLI is not stable either, so you may need to make your tool detect the
+different versions and call the right command.
+* Using the CLI means that your tool will work with custom-built `jj` binaries,
+like the one at Google (if you're using the library, you will not be able to
+detect custom backends and more).
+
+
 [bookmarks_conflicts]: bookmarks.md#conflicts
 
 [change ID]: glossary.md#change-id
@@ -318,4 +372,4 @@ We hope to integrate with Gerrit natively in the future.
 
 [templates]: templates.md
 
-[this issue]: https://github.com/martinvonz/jj/issues/1531
+[this issue]: https://github.com/jj-vcs/jj/issues/1531

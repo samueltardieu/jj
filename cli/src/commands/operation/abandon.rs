@@ -16,6 +16,7 @@ use std::io::Write as _;
 use std::iter;
 use std::slice;
 
+use clap_complete::ArgValueCandidates;
 use itertools::Itertools as _;
 use jj_lib::op_walk;
 
@@ -24,6 +25,7 @@ use crate::cli_util::CommandHelper;
 use crate::command_error::cli_error;
 use crate::command_error::user_error;
 use crate::command_error::CommandError;
+use crate::complete;
 use crate::ui::Ui;
 
 /// Abandon operation history
@@ -40,6 +42,7 @@ use crate::ui::Ui;
 #[derive(clap::Args, Clone, Debug)]
 pub struct OperationAbandonArgs {
     /// The operation or operation range to abandon
+    #[arg(add = ArgValueCandidates::new(complete::operations))]
     operation: String,
 }
 
@@ -123,7 +126,7 @@ pub fn cmd_op_abandon(
         stats.rewritten_count,
     )?;
     for (old, new_id) in reparented_head_ops().filter(|&(old, new_id)| old.id() != new_id) {
-        op_heads_store.update_op_heads(slice::from_ref(old.id()), new_id);
+        op_heads_store.update_op_heads(slice::from_ref(old.id()), new_id)?;
     }
     // Remap the operation id of the current workspace. If there were any
     // divergent operations, user will need to re-abandon their ancestors.

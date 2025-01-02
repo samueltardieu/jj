@@ -25,6 +25,8 @@ use std::str;
 
 use thiserror::Error;
 
+use crate::config::ConfigGetError;
+use crate::settings::UserSettings;
 use crate::signing::SigStatus;
 use crate::signing::SignError;
 use crate::signing::SigningBackend;
@@ -143,16 +145,10 @@ impl GpgBackend {
         self
     }
 
-    pub fn from_config(config: &config::Config) -> Self {
-        Self::new(
-            config
-                .get_string("signing.backends.gpg.program")
-                .unwrap_or_else(|_| "gpg".into())
-                .into(),
-            config
-                .get_bool("signing.backends.gpg.allow-expired-keys")
-                .unwrap_or(false),
-        )
+    pub fn from_settings(settings: &UserSettings) -> Result<Self, ConfigGetError> {
+        let program = settings.get_string("signing.backends.gpg.program")?;
+        let allow_expired_keys = settings.get_bool("signing.backends.gpg.allow-expired-keys")?;
+        Ok(Self::new(program.into(), allow_expired_keys))
     }
 
     fn create_command(&self) -> Command {

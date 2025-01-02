@@ -35,31 +35,6 @@ fn test_alias_basic() {
 }
 
 #[test]
-fn test_alias_legacy_section() {
-    let test_env = TestEnvironment::default();
-    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
-    let repo_path = test_env.env_root().join("repo");
-
-    // Can define aliases in [alias] section
-    test_env.add_config(r#"alias.bk = ["log", "-r", "@", "-T", "bookmarks"]"#);
-    test_env.jj_cmd_ok(&repo_path, &["bookmark", "create", "my-bookmark"]);
-    let stdout = test_env.jj_cmd_success(&repo_path, &["bk"]);
-    insta::assert_snapshot!(stdout, @r###"
-    @  my-bookmark
-    │
-    ~
-    "###);
-
-    // The same alias (name) in both [alias] and [aliases] sections is an error
-    test_env.add_config(r#"aliases.bk = ["bookmark", "list"]"#);
-    let stderr = test_env.jj_cmd_failure(&repo_path, &["bk"]);
-    insta::assert_snapshot!(stderr, @r###"
-    Error: Alias "bk" is defined in both [aliases] and [alias]
-    Hint: [aliases] is the preferred section for aliases. Please remove the alias from [alias].
-    "###);
-}
-
-#[test]
 fn test_alias_bad_name() {
     let test_env = TestEnvironment::default();
     test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
@@ -135,7 +110,7 @@ fn test_alias_calls_command_with_invalid_option() {
 
       tip: to pass '--nonexistent' as a value, use '-- --nonexistent'
 
-    Usage: jj log [OPTIONS] [PATHS]...
+    Usage: jj log [OPTIONS] [FILESETS]...
 
     For more information, try '--help'.
     "###);
@@ -151,7 +126,7 @@ fn test_alias_calls_help() {
     insta::assert_snapshot!(stdout.lines().take(5).join("\n"), @r###"
     Jujutsu (An experimental VCS)
 
-    To get started, see the tutorial at https://martinvonz.github.io/jj/latest/tutorial/.
+    To get started, see the tutorial at https://jj-vcs.github.io/jj/latest/tutorial/.
 
     Usage: jj [OPTIONS] <COMMAND>
     "###);
@@ -255,17 +230,25 @@ fn test_alias_invalid_definition() {
     test_env.add_config(
         r#"[aliases]
     non-list = 5
-    non-string-list = [[]]
+    non-string-list = [0]
     "#,
     );
     let stderr = test_env.jj_cmd_failure(test_env.env_root(), &["non-list"]);
-    insta::assert_snapshot!(stderr, @r###"
-    Error: Alias definition for "non-list" must be a string list
-    "###);
+    insta::assert_snapshot!(stderr.replace('\\', "/"), @r"
+    Config error: Invalid type or value for aliases.non-list
+    Caused by: invalid type: integer `5`, expected a sequence
+
+    Hint: Check the config file: $TEST_ENV/config/config0002.toml
+    For help, see https://jj-vcs.github.io/jj/latest/config/.
+    ");
     let stderr = test_env.jj_cmd_failure(test_env.env_root(), &["non-string-list"]);
-    insta::assert_snapshot!(stderr, @r###"
-    Error: Alias definition for "non-string-list" must be a string list
-    "###);
+    insta::assert_snapshot!(stderr, @r"
+    Config error: Invalid type or value for aliases.non-string-list
+    Caused by: invalid type: integer `0`, expected a string
+
+    Hint: Check the config file: $TEST_ENV/config/config0002.toml
+    For help, see https://jj-vcs.github.io/jj/latest/config/.
+    ");
 }
 
 #[test]
@@ -337,7 +320,5 @@ fn test_alias_in_repo_config() {
             repo2_path.to_str().unwrap(),
         ],
     );
-    insta::assert_snapshot!(stdout, @r###"
-    aliases.l = ["log", "-r@", "--no-graph", '-T"user alias\n"']
-    "###);
+    insta::assert_snapshot!(stdout, @r#"aliases.l = ['log', '-r@', '--no-graph', '-T"user alias\n"']"#);
 }

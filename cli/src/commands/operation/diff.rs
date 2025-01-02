@@ -13,8 +13,10 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::sync::Arc;
 
+use clap_complete::ArgValueCandidates;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use jj_lib::backend::ChangeId;
@@ -40,6 +42,7 @@ use crate::cli_util::CommandHelper;
 use crate::cli_util::LogContentFormat;
 use crate::command_error::CommandError;
 use crate::commit_templater::CommitTemplateLanguage;
+use crate::complete;
 use crate::diff_util::diff_formats_for_log;
 use crate::diff_util::DiffFormatArgs;
 use crate::diff_util::DiffRenderer;
@@ -54,13 +57,25 @@ use crate::ui::Ui;
 #[derive(clap::Args, Clone, Debug)]
 pub struct OperationDiffArgs {
     /// Show repository changes in this operation, compared to its parent
-    #[arg(long, visible_alias = "op")]
+    #[arg(
+        long,
+        visible_alias = "op",
+        add = ArgValueCandidates::new(complete::operations),
+    )]
     operation: Option<String>,
     /// Show repository changes from this operation
-    #[arg(long, conflicts_with = "operation")]
+    #[arg(
+        long, short,
+        conflicts_with = "operation",
+        add = ArgValueCandidates::new(complete::operations),
+    )]
     from: Option<String>,
     /// Show repository changes to this operation
-    #[arg(long, conflicts_with = "operation")]
+    #[arg(
+        long, short,
+        conflicts_with = "operation",
+        add = ArgValueCandidates::new(complete::operations),
+    )]
     to: Option<String>,
     /// Don't show the graph, show a flat list of modified changes
     #[arg(long)]
@@ -92,7 +107,7 @@ pub fn cmd_op_diff(
     } else {
         to_op = workspace_command.resolve_single_op(args.operation.as_deref().unwrap_or("@"))?;
         let to_op_parents: Vec<_> = to_op.parents().try_collect()?;
-        from_op = repo_loader.merge_operations(command.settings(), to_op_parents, None)?;
+        from_op = repo_loader.merge_operations(to_op_parents, None)?;
     }
     let graph_style = GraphStyle::from_settings(command.settings())?;
     let with_content_format = LogContentFormat::new(ui, command.settings())?;
@@ -101,7 +116,7 @@ pub fn cmd_op_diff(
     let to_repo = repo_loader.load_at(&to_op)?;
 
     // Create a new transaction starting from `to_repo`.
-    let mut tx = to_repo.start_transaction(command.settings());
+    let mut tx = to_repo.start_transaction();
     // Merge index from `from_repo` to `to_repo`, so commits in `from_repo` are
     // accessible.
     tx.repo_mut().merge_index(&from_repo);
@@ -110,15 +125,14 @@ pub fn cmd_op_diff(
     let diff_renderer = {
         let formats = diff_formats_for_log(command.settings(), &args.diff_format, args.patch)?;
         let path_converter = workspace_env.path_converter();
-        (!formats.is_empty()).then(|| DiffRenderer::new(merged_repo, path_converter, formats))
+        let conflict_marker_style = workspace_env.conflict_marker_style();
+        (!formats.is_empty())
+            .then(|| DiffRenderer::new(merged_repo, path_converter, conflict_marker_style, formats))
     };
     let id_prefix_context = workspace_env.new_id_prefix_context();
     let commit_summary_template = {
         let language = workspace_env.commit_template_language(merged_repo, &id_prefix_context);
-        let text = command
-            .settings()
-            .config()
-            .get_string("templates.commit_summary")?;
+        let text = command.settings().get_string("templates.commit_summary")?;
         workspace_env.parse_template(ui, &language, &text, CommitTemplateLanguage::wrap_commit)?
     };
 
@@ -198,19 +212,21 @@ pub fn show_op_diff(
             let mut raw_output = formatter.raw()?;
             let mut graph = get_graphlog(graph_style, raw_output.as_mut());
 
-            let graph_iter =
-                TopoGroupedGraphIterator::new(ordered_change_ids.iter().map(|change_id| {
+            let graph_iter = TopoGroupedGraphIterator::new(ordered_change_ids.iter().map(
+                |change_id| -> Result<_, Infallible> {
                     let parent_change_ids = change_parents.get(change_id).unwrap();
-                    (
+                    Ok((
                         change_id.clone(),
                         parent_change_ids
                             .iter()
                             .map(|parent_change_id| GraphEdge::direct(parent_change_id.clone()))
                             .collect_vec(),
-                    )
-                }));
+                    ))
+                },
+            ));
 
-            for (change_id, edges) in graph_iter {
+            for node in graph_iter {
+                let (change_id, edges) = node.unwrap();
                 let modified_change = changes.get(&change_id).unwrap();
                 let edges = edges
                     .iter()

@@ -607,14 +607,14 @@ fn test_squash_from_to_partial() {
     insta::assert_snapshot!(stderr, @r###"
     Rebased 1 descendant commits
     "###);
-    insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
-    ○  d2a587ae205d c
-    ○  a53394306362 b
-    │ @  e0dac715116f d
+    insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r#"
+    @  e0dac715116f d
+    │ ○  d2a587ae205d c
+    │ ○  a53394306362 b
     ├─╯
     ○  b7b767179c44 a
     ◆  000000000000 (empty)
-    "###);
+    "#);
     // The selected change from the source has been applied
     let stdout = test_env.jj_cmd_success(&repo_path, &["file", "show", "file1", "-r", "b"]);
     insta::assert_snapshot!(stdout, @r###"
@@ -688,10 +688,10 @@ fn test_squash_from_multiple() {
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
     Rebased 2 descendant commits
-    Working copy now at: kpqxywon 3e25ee21 f | (no description set)
-    Parent commit      : yostqsxw abb5a4ea e | (no description set)
+    Working copy now at: kpqxywon 7ea39167 f | (no description set)
+    Parent commit      : yostqsxw acfbf2a0 e | (no description set)
     New conflicts appeared in these commits:
-      yqosqzyt 98759deb d | (conflict) (no description set)
+      yqosqzyt 4df3b215 d | (conflict) (no description set)
     To resolve the conflicts, start by updating to it:
       jj new yqosqzyt
     Then use `jj resolve`, or edit the conflict markers in the file directly.
@@ -699,10 +699,10 @@ fn test_squash_from_multiple() {
     Then run `jj squash` to move the resolution into the conflicted commit.
     "###);
     insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
-    @  3e25ee211f3f f
-    ○    abb5a4ea1222 e
+    @  7ea391676d52 f
+    ○    acfbf2a0600d e
     ├─╮
-    × │  98759debcee5 d
+    × │  4df3b2156c3d d
     ├─╯
     ○  3b1673b6370c a b c
     ◆  000000000000 (empty)
@@ -813,10 +813,10 @@ fn test_squash_from_multiple_partial() {
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
     Rebased 2 descendant commits
-    Working copy now at: kpqxywon 056dc38b f | (no description set)
-    Parent commit      : yostqsxw 45069475 e | (no description set)
+    Working copy now at: kpqxywon a8530305 f | (no description set)
+    Parent commit      : yostqsxw 0a3637fc e | (no description set)
     New conflicts appeared in these commits:
-      yqosqzyt b91b1157 d | (conflict) (no description set)
+      yqosqzyt 05a3ab3d d | (conflict) (no description set)
     To resolve the conflicts, start by updating to it:
       jj new yqosqzyt
     Then use `jj resolve`, or edit the conflict markers in the file directly.
@@ -824,13 +824,13 @@ fn test_squash_from_multiple_partial() {
     Then run `jj squash` to move the resolution into the conflicted commit.
     "###);
     insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
-    @  056dc38bf286 f
-    ○      450694753699 e
+    @  a8530305127c f
+    ○      0a3637fca632 e
     ├─┬─╮
     │ │ ○  450d1499c1ae b
     │ ○ │  14b44bf0473c c
     │ ├─╯
-    × │  b91b11575906 d
+    × │  05a3ab3dffc8 d
     ├─╯
     ○  54d3c1c0e9fd a
     ◆  000000000000 (empty)
@@ -1074,7 +1074,7 @@ fn test_squash_description() {
     JJ: Description from source commit:
     source
 
-    JJ: Lines starting with "JJ: " (like this one) will be removed.
+    JJ: Lines starting with "JJ:" (like this one) will be removed.
     "###);
 
     // An explicit description on the command-line overrides prevents launching an
@@ -1215,7 +1215,7 @@ fn test_squash_use_destination_message_and_message_mutual_exclusion() {
     ), @r###"
     error: the argument '--message <MESSAGE>' cannot be used with '--use-destination-message'
 
-    Usage: jj squash --message <MESSAGE> [PATHS]...
+    Usage: jj squash --message <MESSAGE> [FILESETS]...
 
     For more information, try '--help'.
     "###);

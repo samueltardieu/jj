@@ -37,6 +37,9 @@ use jj_lib::backend::Timestamp;
 use jj_lib::backend::TreeValue;
 use jj_lib::commit::Commit;
 use jj_lib::commit_builder::CommitBuilder;
+use jj_lib::config::ConfigLayer;
+use jj_lib::config::ConfigSource;
+use jj_lib::config::StackedConfig;
 use jj_lib::git_backend::GitBackend;
 use jj_lib::local_backend::LocalBackend;
 use jj_lib::merged_tree::MergedTree;
@@ -57,11 +60,12 @@ use jj_lib::tree::Tree;
 use jj_lib::tree_builder::TreeBuilder;
 use jj_lib::working_copy::SnapshotError;
 use jj_lib::working_copy::SnapshotOptions;
+use jj_lib::working_copy::SnapshotStats;
 use jj_lib::workspace::Workspace;
 use pollster::FutureExt;
 use tempfile::TempDir;
 
-use crate::test_backend::TestBackend;
+use crate::test_backend::TestBackendFactory;
 
 pub mod test_backend;
 pub mod test_signing_backend;
@@ -101,26 +105,74 @@ pub fn new_temp_dir() -> TempDir {
         .unwrap()
 }
 
-pub fn base_config() -> config::ConfigBuilder<config::builder::DefaultState> {
-    config::Config::builder().add_source(config::File::from_str(
-        r#"
-            user.name = "Test User"
-            user.email = "test.user@example.com"
-            operation.username = "test-username"
-            operation.hostname = "host.example.com"
-            debug.randomness-seed = "42"
-        "#,
-        config::FileFormat::Toml,
-    ))
+/// Returns new low-level config object that includes fake user configuration
+/// needed to run basic operations.
+pub fn base_user_config() -> StackedConfig {
+    let config_text = r#"
+        user.name = "Test User"
+        user.email = "test.user@example.com"
+        operation.username = "test-username"
+        operation.hostname = "host.example.com"
+        debug.randomness-seed = 42
+    "#;
+    let mut config = StackedConfig::with_defaults();
+    config.add_layer(ConfigLayer::parse(ConfigSource::User, config_text).unwrap());
+    config
 }
 
+/// Returns new immutable settings object that includes fake user configuration
+/// needed to run basic operations.
 pub fn user_settings() -> UserSettings {
-    let config = base_config().build().unwrap();
-    UserSettings::from_config(config)
+    UserSettings::from_config(base_user_config()).unwrap()
+}
+
+#[derive(Debug)]
+pub struct TestEnvironment {
+    temp_dir: TempDir,
+    test_backend_factory: TestBackendFactory,
+}
+
+impl TestEnvironment {
+    pub fn init() -> Self {
+        TestEnvironment {
+            temp_dir: new_temp_dir(),
+            test_backend_factory: TestBackendFactory::default(),
+        }
+    }
+
+    pub fn root(&self) -> &Path {
+        self.temp_dir.path()
+    }
+
+    pub fn default_store_factories(&self) -> StoreFactories {
+        let mut factories = StoreFactories::default();
+        factories.add_backend("test", {
+            let factory = self.test_backend_factory.clone();
+            Box::new(move |_settings, store_path| Ok(Box::new(factory.load(store_path))))
+        });
+        factories.add_backend(
+            SecretBackend::name(),
+            Box::new(|settings, store_path| {
+                Ok(Box::new(SecretBackend::load(settings, store_path)?))
+            }),
+        );
+        factories
+    }
+
+    pub fn load_repo_at_head(
+        &self,
+        settings: &UserSettings,
+        repo_path: &Path,
+    ) -> Arc<ReadonlyRepo> {
+        RepoLoader::init_from_file_system(settings, repo_path, &self.default_store_factories())
+            .unwrap()
+            .load_at_head()
+            .unwrap()
+    }
 }
 
 pub struct TestRepo {
-    _temp_dir: TempDir,
+    pub env: TestEnvironment,
     pub repo: Arc<ReadonlyRepo>,
     repo_path: PathBuf,
 }
@@ -135,13 +187,14 @@ pub enum TestRepoBackend {
 impl TestRepoBackend {
     fn init_backend(
         &self,
+        env: &TestEnvironment,
         settings: &UserSettings,
         store_path: &Path,
     ) -> Result<Box<dyn Backend>, BackendInitError> {
         match self {
             TestRepoBackend::Git => Ok(Box::new(GitBackend::init_internal(settings, store_path)?)),
             TestRepoBackend::Local => Ok(Box::new(LocalBackend::init(store_path))),
-            TestRepoBackend::Test => Ok(Box::new(TestBackend::init(store_path))),
+            TestRepoBackend::Test => Ok(Box::new(env.test_backend_factory.init(store_path))),
         }
     }
 }
@@ -163,15 +216,15 @@ impl TestRepo {
         backend: TestRepoBackend,
         settings: &UserSettings,
     ) -> Self {
-        let temp_dir = new_temp_dir();
+        let env = TestEnvironment::init();
 
-        let repo_dir = temp_dir.path().join("repo");
+        let repo_dir = env.root().join("repo");
         fs::create_dir(&repo_dir).unwrap();
 
         let repo = ReadonlyRepo::init(
             settings,
             &repo_dir,
-            &move |settings, store_path| backend.init_backend(settings, store_path),
+            &|settings, store_path| backend.init_backend(&env, settings, store_path),
             Signer::from_settings(settings).unwrap(),
             ReadonlyRepo::default_op_store_initializer(),
             ReadonlyRepo::default_op_heads_store_initializer(),
@@ -181,25 +234,10 @@ impl TestRepo {
         .unwrap();
 
         Self {
-            _temp_dir: temp_dir,
+            env,
             repo,
             repo_path: repo_dir,
         }
-    }
-
-    pub fn default_store_factories() -> StoreFactories {
-        let mut factories = StoreFactories::default();
-        factories.add_backend(
-            "test",
-            Box::new(|_settings, store_path| Ok(Box::new(TestBackend::load(store_path)))),
-        );
-        factories.add_backend(
-            SecretBackend::name(),
-            Box::new(|settings, store_path| {
-                Ok(Box::new(SecretBackend::load(settings, store_path)?))
-            }),
-        );
-        factories
     }
 
     pub fn repo_path(&self) -> &Path {
@@ -208,7 +246,7 @@ impl TestRepo {
 }
 
 pub struct TestWorkspace {
-    temp_dir: TempDir,
+    pub env: TestEnvironment,
     pub workspace: Workspace,
     pub repo: Arc<ReadonlyRepo>,
 }
@@ -231,28 +269,28 @@ impl TestWorkspace {
         backend: TestRepoBackend,
         signer: Signer,
     ) -> Self {
-        let temp_dir = new_temp_dir();
+        let env = TestEnvironment::init();
 
-        let workspace_root = temp_dir.path().join("repo");
+        let workspace_root = env.root().join("repo");
         fs::create_dir(&workspace_root).unwrap();
 
         let (workspace, repo) = Workspace::init_with_backend(
             settings,
             &workspace_root,
-            &move |settings, store_path| backend.init_backend(settings, store_path),
+            &|settings, store_path| backend.init_backend(&env, settings, store_path),
             signer,
         )
         .unwrap();
 
         Self {
-            temp_dir,
+            env,
             workspace,
             repo,
         }
     }
 
     pub fn root_dir(&self) -> PathBuf {
-        self.temp_dir.path().join("repo").join("..")
+        self.env.root().join("repo").join("..")
     }
 
     pub fn repo_path(&self) -> &Path {
@@ -265,35 +303,29 @@ impl TestWorkspace {
     pub fn snapshot_with_options(
         &mut self,
         options: &SnapshotOptions,
-    ) -> Result<MergedTree, SnapshotError> {
+    ) -> Result<(MergedTree, SnapshotStats), SnapshotError> {
         let mut locked_ws = self.workspace.start_working_copy_mutation().unwrap();
-        let tree_id = locked_ws.locked_wc().snapshot(options)?;
+        let (tree_id, stats) = locked_ws.locked_wc().snapshot(options)?;
         // arbitrary operation id
         locked_ws.finish(self.repo.op_id().clone()).unwrap();
-        Ok(self.repo.store().get_root_tree(&tree_id).unwrap())
+        Ok((self.repo.store().get_root_tree(&tree_id).unwrap(), stats))
     }
 
     /// Like `snapshot_with_option()` but with default options
     pub fn snapshot(&mut self) -> Result<MergedTree, SnapshotError> {
-        self.snapshot_with_options(&SnapshotOptions::empty_for_test())
+        let (tree_id, _stats) = self.snapshot_with_options(&SnapshotOptions::empty_for_test())?;
+        Ok(tree_id)
     }
 }
 
-pub fn load_repo_at_head(settings: &UserSettings, repo_path: &Path) -> Arc<ReadonlyRepo> {
-    RepoLoader::init_from_file_system(settings, repo_path, &TestRepo::default_store_factories())
-        .unwrap()
-        .load_at_head(settings)
-        .unwrap()
-}
-
-pub fn commit_transactions(settings: &UserSettings, txs: Vec<Transaction>) -> Arc<ReadonlyRepo> {
+pub fn commit_transactions(txs: Vec<Transaction>) -> Arc<ReadonlyRepo> {
     let repo_loader = txs[0].base_repo().loader().clone();
     let mut op_ids = vec![];
     for tx in txs {
-        op_ids.push(tx.commit("test").op_id().clone());
+        op_ids.push(tx.commit("test").unwrap().op_id().clone());
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    let repo = repo_loader.load_at_head(settings).unwrap();
+    let repo = repo_loader.load_at_head().unwrap();
     // Test the setup. The assumption here is that the parent order matches the
     // order in which they were merged (which currently matches the transaction
     // commit order), so we want to know make sure they appear in a certain
@@ -360,7 +392,7 @@ pub fn create_single_tree(repo: &Arc<ReadonlyRepo>, path_contents: &[(&RepoPath,
         write_normal_file(&mut tree_builder, path, contents);
     }
     let id = tree_builder.write_tree().unwrap();
-    store.get_tree(RepoPath::root(), &id).unwrap()
+    store.get_tree(RepoPathBuf::root(), &id).unwrap()
 }
 
 pub fn create_tree(repo: &Arc<ReadonlyRepo>, path_contents: &[(&RepoPath, &str)]) -> MergedTree {
@@ -374,18 +406,11 @@ pub fn create_random_tree(repo: &Arc<ReadonlyRepo>) -> MergedTreeId {
     create_tree(repo, &[(&path, "contents")]).id()
 }
 
-pub fn create_random_commit<'repo>(
-    mut_repo: &'repo mut MutableRepo,
-    settings: &UserSettings,
-) -> CommitBuilder<'repo> {
+pub fn create_random_commit(mut_repo: &mut MutableRepo) -> CommitBuilder<'_> {
     let tree_id = create_random_tree(mut_repo.base_repo());
     let number = rand::random::<u32>();
     mut_repo
-        .new_commit(
-            settings,
-            vec![mut_repo.store().root_commit_id().clone()],
-            tree_id,
-        )
+        .new_commit(vec![mut_repo.store().root_commit_id().clone()], tree_id)
         .set_description(format!("random commit {number}"))
 }
 
@@ -446,12 +471,12 @@ pub fn dump_tree(store: &Arc<Store>, tree_id: &MergedTreeId) -> String {
     buf
 }
 
-pub fn write_random_commit(mut_repo: &mut MutableRepo, settings: &UserSettings) -> Commit {
-    create_random_commit(mut_repo, settings).write().unwrap()
+pub fn write_random_commit(mut_repo: &mut MutableRepo) -> Commit {
+    create_random_commit(mut_repo).write().unwrap()
 }
 
 pub fn write_working_copy_file(workspace_root: &Path, path: &RepoPath, contents: &str) {
-    let path = path.to_fs_path(workspace_root);
+    let path = path.to_fs_path(workspace_root).unwrap();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
@@ -464,21 +489,17 @@ pub fn write_working_copy_file(workspace_root: &Path, path: &RepoPath, contents:
     file.write_all(contents.as_bytes()).unwrap();
 }
 
-pub struct CommitGraphBuilder<'settings, 'repo> {
-    settings: &'settings UserSettings,
+pub struct CommitGraphBuilder<'repo> {
     mut_repo: &'repo mut MutableRepo,
 }
 
-impl<'settings, 'repo> CommitGraphBuilder<'settings, 'repo> {
-    pub fn new(
-        settings: &'settings UserSettings,
-        mut_repo: &'repo mut MutableRepo,
-    ) -> CommitGraphBuilder<'settings, 'repo> {
-        CommitGraphBuilder { settings, mut_repo }
+impl<'repo> CommitGraphBuilder<'repo> {
+    pub fn new(mut_repo: &'repo mut MutableRepo) -> Self {
+        CommitGraphBuilder { mut_repo }
     }
 
     pub fn initial_commit(&mut self) -> Commit {
-        write_random_commit(self.mut_repo, self.settings)
+        write_random_commit(self.mut_repo)
     }
 
     pub fn commit_with_parents(&mut self, parents: &[&Commit]) -> Commit {
@@ -486,7 +507,7 @@ impl<'settings, 'repo> CommitGraphBuilder<'settings, 'repo> {
             .iter()
             .map(|commit| commit.id().clone())
             .collect_vec();
-        create_random_commit(self.mut_repo, self.settings)
+        create_random_commit(self.mut_repo)
             .set_parents(parent_ids)
             .write()
             .unwrap()

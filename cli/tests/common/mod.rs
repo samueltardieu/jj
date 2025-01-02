@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 
+use indoc::formatdoc;
 use itertools::Itertools as _;
 use regex::Captures;
 use regex::Regex;
@@ -55,7 +56,7 @@ impl Default for TestEnvironment {
         testutils::hermetic_libgit2();
 
         let tmp_dir = testutils::new_temp_dir();
-        let env_root = tmp_dir.path().canonicalize().unwrap();
+        let env_root = dunce::canonicalize(tmp_dir.path()).unwrap();
         let home_dir = env_root.join("home");
         std::fs::create_dir(&home_dir).unwrap();
         let config_dir = env_root.join("config");
@@ -248,11 +249,17 @@ impl TestEnvironment {
         &self.config_path
     }
 
-    pub fn set_config_path(&mut self, config_path: PathBuf) {
-        self.config_path = config_path;
+    pub fn last_config_file_path(&self) -> PathBuf {
+        let config_file_number = self.config_file_number.borrow();
+        self.config_path
+            .join(format!("config{config_file_number:04}.toml"))
     }
 
-    pub fn add_config(&self, content: &str) {
+    pub fn set_config_path(&mut self, config_path: impl Into<PathBuf>) {
+        self.config_path = config_path.into();
+    }
+
+    pub fn add_config(&self, content: impl AsRef<[u8]>) {
         if self.config_path.is_file() {
             panic!("add_config not supported when config_path is a file");
         }
@@ -269,8 +276,8 @@ impl TestEnvironment {
         .unwrap();
     }
 
-    pub fn add_env_var(&mut self, key: &str, val: &str) {
-        self.env_vars.insert(key.to_string(), val.to_string());
+    pub fn add_env_var(&mut self, key: impl Into<String>, val: impl Into<String>) {
+        self.env_vars.insert(key.into(), val.into());
     }
 
     pub fn current_operation_id(&self, repo_path: &Path) -> String {
@@ -282,22 +289,16 @@ impl TestEnvironment {
     /// Sets up the fake editor to read an edit script from the returned path
     /// Also sets up the fake editor as a merge tool named "fake-editor"
     pub fn set_up_fake_editor(&mut self) -> PathBuf {
-        let editor_path = assert_cmd::cargo::cargo_bin("fake-editor");
-        assert!(editor_path.is_file());
-        // Simplified TOML escaping, hoping that there are no '"' or control characters
-        // in it
-        let escaped_editor_path = editor_path.to_str().unwrap().replace('\\', r"\\");
-        self.add_env_var("EDITOR", &escaped_editor_path);
-        self.add_config(&format!(
-            r###"
-                    [ui]
-                    merge-editor = "fake-editor"
+        let editor_path = to_toml_value(fake_editor_path());
+        self.add_config(formatdoc! {r#"
+            [ui]
+            editor = {editor_path}
+            merge-editor = "fake-editor"
 
-                    [merge-tools]
-                    fake-editor.program="{escaped_editor_path}"
-                    fake-editor.merge-args = ["$output"]
-                "###
-        ));
+            [merge-tools]
+            fake-editor.program = {editor_path}
+            fake-editor.merge-args = ["$output"]
+        "#});
         let edit_script = self.env_root().join("edit_script");
         std::fs::write(&edit_script, "").unwrap();
         self.add_env_var("EDIT_SCRIPT", edit_script.to_str().unwrap());
@@ -307,13 +308,11 @@ impl TestEnvironment {
     /// Sets up the fake diff-editor to read an edit script from the returned
     /// path
     pub fn set_up_fake_diff_editor(&mut self) -> PathBuf {
-        let escaped_diff_editor_path = escaped_fake_diff_editor_path();
-        self.add_config(&format!(
-            r###"
+        let diff_editor_path = to_toml_value(fake_diff_editor_path());
+        self.add_config(formatdoc! {r#"
             ui.diff-editor = "fake-diff-editor"
-            merge-tools.fake-diff-editor.program = "{escaped_diff_editor_path}"
-            "###
-        ));
+            merge-tools.fake-diff-editor.program = {diff_editor_path}
+        "#});
         let edit_script = self.env_root().join("diff_edit_script");
         std::fs::write(&edit_script, "").unwrap();
         self.add_env_var("DIFF_EDIT_SCRIPT", edit_script.to_str().unwrap());
@@ -322,16 +321,20 @@ impl TestEnvironment {
 
     pub fn normalize_output(&self, text: &str) -> String {
         let text = text.replace("jj.exe", "jj");
-        let regex = Regex::new(&format!(
-            r"{}(\S+)",
-            regex::escape(&self.env_root.display().to_string())
-        ))
-        .unwrap();
-        regex
-            .replace_all(&text, |caps: &Captures| {
-                format!("$TEST_ENV{}", caps[1].replace('\\', "/"))
-            })
-            .to_string()
+        let env_root = self.env_root.display().to_string();
+        // Platform-native $TEST_ENV
+        let regex = Regex::new(&format!(r"{}(\S+)", regex::escape(&env_root))).unwrap();
+        let text = regex.replace_all(&text, |caps: &Captures| {
+            format!("$TEST_ENV{}", caps[1].replace('\\', "/"))
+        });
+        // Slash-separated $TEST_ENV
+        let text = if cfg!(windows) {
+            let regex = Regex::new(&regex::escape(&env_root.replace('\\', "/"))).unwrap();
+            regex.replace_all(&text, regex::NoExpand("$TEST_ENV"))
+        } else {
+            text
+        };
+        text.into_owned()
     }
 
     /// Used before mutating operations to create more predictable commit ids
@@ -357,12 +360,21 @@ pub fn get_stderr_string(assert: &assert_cmd::assert::Assert) -> String {
     String::from_utf8(assert.get_output().stderr.clone()).unwrap()
 }
 
-pub fn escaped_fake_diff_editor_path() -> String {
-    let diff_editor_path = assert_cmd::cargo::cargo_bin("fake-diff-editor");
-    assert!(diff_editor_path.is_file());
-    // Simplified TOML escaping, hoping that there are no '"' or control characters
-    // in it
-    diff_editor_path.to_str().unwrap().replace('\\', r"\\")
+pub fn fake_editor_path() -> String {
+    let path = assert_cmd::cargo::cargo_bin("fake-editor");
+    assert!(path.is_file());
+    path.into_os_string().into_string().unwrap()
+}
+
+pub fn fake_diff_editor_path() -> String {
+    let path = assert_cmd::cargo::cargo_bin("fake-diff-editor");
+    assert!(path.is_file());
+    path.into_os_string().into_string().unwrap()
+}
+
+/// Coerces the value type to serialize it as TOML.
+pub fn to_toml_value(value: impl Into<toml_edit::Value>) -> toml_edit::Value {
+    value.into()
 }
 
 /// Returns a string with the last line removed.

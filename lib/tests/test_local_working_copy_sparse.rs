@@ -19,6 +19,7 @@ use jj_lib::matchers::EverythingMatcher;
 use jj_lib::repo::Repo;
 use jj_lib::repo_path::RepoPath;
 use jj_lib::repo_path::RepoPathBuf;
+use jj_lib::working_copy::CheckoutOptions;
 use jj_lib::working_copy::CheckoutStats;
 use jj_lib::working_copy::WorkingCopy;
 use pollster::FutureExt as _;
@@ -62,7 +63,12 @@ fn test_sparse_checkout() {
 
     test_workspace
         .workspace
-        .check_out(repo.op_id().clone(), None, &commit)
+        .check_out(
+            repo.op_id().clone(),
+            None,
+            &commit,
+            &CheckoutOptions::empty_for_test(),
+        )
         .unwrap();
     let ws = &mut test_workspace.workspace;
 
@@ -71,7 +77,7 @@ fn test_sparse_checkout() {
     let sparse_patterns = to_owned_path_vec(&[dir1_path]);
     let stats = locked_ws
         .locked_wc()
-        .set_sparse_patterns(sparse_patterns.clone())
+        .set_sparse_patterns(sparse_patterns.clone(), &CheckoutOptions::empty_for_test())
         .unwrap();
     assert_eq!(
         stats,
@@ -86,14 +92,24 @@ fn test_sparse_checkout() {
         locked_ws.locked_wc().sparse_patterns().unwrap(),
         sparse_patterns
     );
-    assert!(!root_file1_path.to_fs_path(&working_copy_path).exists());
-    assert!(!root_file2_path.to_fs_path(&working_copy_path).exists());
-    assert!(dir1_file1_path.to_fs_path(&working_copy_path).exists());
-    assert!(dir1_file2_path.to_fs_path(&working_copy_path).exists());
-    assert!(dir1_subdir1_file1_path
-        .to_fs_path(&working_copy_path)
+    assert!(!root_file1_path
+        .to_fs_path_unchecked(&working_copy_path)
         .exists());
-    assert!(!dir2_file1_path.to_fs_path(&working_copy_path).exists());
+    assert!(!root_file2_path
+        .to_fs_path_unchecked(&working_copy_path)
+        .exists());
+    assert!(dir1_file1_path
+        .to_fs_path_unchecked(&working_copy_path)
+        .exists());
+    assert!(dir1_file2_path
+        .to_fs_path_unchecked(&working_copy_path)
+        .exists());
+    assert!(dir1_subdir1_file1_path
+        .to_fs_path_unchecked(&working_copy_path)
+        .exists());
+    assert!(!dir2_file1_path
+        .to_fs_path_unchecked(&working_copy_path)
+        .exists());
 
     // Write the new state to disk
     locked_ws.finish(repo.op_id().clone()).unwrap();
@@ -120,7 +136,7 @@ fn test_sparse_checkout() {
     let mut locked_wc = wc.start_mutation().unwrap();
     let sparse_patterns = to_owned_path_vec(&[root_file1_path, dir1_subdir1_path, dir2_path]);
     let stats = locked_wc
-        .set_sparse_patterns(sparse_patterns.clone())
+        .set_sparse_patterns(sparse_patterns.clone(), &CheckoutOptions::empty_for_test())
         .unwrap();
     assert_eq!(
         stats,
@@ -132,14 +148,24 @@ fn test_sparse_checkout() {
         }
     );
     assert_eq!(locked_wc.sparse_patterns().unwrap(), sparse_patterns);
-    assert!(root_file1_path.to_fs_path(&working_copy_path).exists());
-    assert!(!root_file2_path.to_fs_path(&working_copy_path).exists());
-    assert!(!dir1_file1_path.to_fs_path(&working_copy_path).exists());
-    assert!(!dir1_file2_path.to_fs_path(&working_copy_path).exists());
-    assert!(dir1_subdir1_file1_path
-        .to_fs_path(&working_copy_path)
+    assert!(root_file1_path
+        .to_fs_path_unchecked(&working_copy_path)
         .exists());
-    assert!(dir2_file1_path.to_fs_path(&working_copy_path).exists());
+    assert!(!root_file2_path
+        .to_fs_path_unchecked(&working_copy_path)
+        .exists());
+    assert!(!dir1_file1_path
+        .to_fs_path_unchecked(&working_copy_path)
+        .exists());
+    assert!(!dir1_file2_path
+        .to_fs_path_unchecked(&working_copy_path)
+        .exists());
+    assert!(dir1_subdir1_file1_path
+        .to_fs_path_unchecked(&working_copy_path)
+        .exists());
+    assert!(dir2_file1_path
+        .to_fs_path_unchecked(&working_copy_path)
+        .exists());
     let wc = locked_wc.finish(repo.op_id().clone()).unwrap();
     let wc: &LocalWorkingCopy = wc.as_any().downcast_ref().unwrap();
     assert_eq!(
@@ -175,7 +201,12 @@ fn test_sparse_commit() {
     let commit = commit_with_tree(repo.store(), tree.id());
     test_workspace
         .workspace
-        .check_out(repo.op_id().clone(), None, &commit)
+        .check_out(
+            repo.op_id().clone(),
+            None,
+            &commit,
+            &CheckoutOptions::empty_for_test(),
+        )
         .unwrap();
 
     // Set sparse patterns to only dir1/
@@ -186,16 +217,28 @@ fn test_sparse_commit() {
     let sparse_patterns = to_owned_path_vec(&[dir1_path]);
     locked_ws
         .locked_wc()
-        .set_sparse_patterns(sparse_patterns)
+        .set_sparse_patterns(sparse_patterns, &CheckoutOptions::empty_for_test())
         .unwrap();
     locked_ws.finish(repo.op_id().clone()).unwrap();
 
     // Write modified version of all files, including files that are not in the
     // sparse patterns.
-    std::fs::write(root_file1_path.to_fs_path(&working_copy_path), "modified").unwrap();
-    std::fs::write(dir1_file1_path.to_fs_path(&working_copy_path), "modified").unwrap();
-    std::fs::create_dir(dir2_path.to_fs_path(&working_copy_path)).unwrap();
-    std::fs::write(dir2_file1_path.to_fs_path(&working_copy_path), "modified").unwrap();
+    std::fs::write(
+        root_file1_path.to_fs_path_unchecked(&working_copy_path),
+        "modified",
+    )
+    .unwrap();
+    std::fs::write(
+        dir1_file1_path.to_fs_path_unchecked(&working_copy_path),
+        "modified",
+    )
+    .unwrap();
+    std::fs::create_dir(dir2_path.to_fs_path_unchecked(&working_copy_path)).unwrap();
+    std::fs::write(
+        dir2_file1_path.to_fs_path_unchecked(&working_copy_path),
+        "modified",
+    )
+    .unwrap();
 
     // Create a tree from the working copy. Only dir1/file1 should be updated in the
     // tree.
@@ -215,7 +258,7 @@ fn test_sparse_commit() {
     let sparse_patterns = to_owned_path_vec(&[dir1_path, dir2_path]);
     locked_ws
         .locked_wc()
-        .set_sparse_patterns(sparse_patterns)
+        .set_sparse_patterns(sparse_patterns, &CheckoutOptions::empty_for_test())
         .unwrap();
     locked_ws.finish(op_id).unwrap();
 
@@ -251,15 +294,23 @@ fn test_sparse_commit_gitignore() {
     let sparse_patterns = to_owned_path_vec(&[dir1_path]);
     locked_ws
         .locked_wc()
-        .set_sparse_patterns(sparse_patterns)
+        .set_sparse_patterns(sparse_patterns, &CheckoutOptions::empty_for_test())
         .unwrap();
     locked_ws.finish(repo.op_id().clone()).unwrap();
 
     // Write dir1/file1 and dir1/file2 and a .gitignore saying to ignore dir1/file1
     std::fs::write(working_copy_path.join(".gitignore"), "dir1/file1").unwrap();
-    std::fs::create_dir(dir1_path.to_fs_path(&working_copy_path)).unwrap();
-    std::fs::write(dir1_file1_path.to_fs_path(&working_copy_path), "contents").unwrap();
-    std::fs::write(dir1_file2_path.to_fs_path(&working_copy_path), "contents").unwrap();
+    std::fs::create_dir(dir1_path.to_fs_path_unchecked(&working_copy_path)).unwrap();
+    std::fs::write(
+        dir1_file1_path.to_fs_path_unchecked(&working_copy_path),
+        "contents",
+    )
+    .unwrap();
+    std::fs::write(
+        dir1_file2_path.to_fs_path_unchecked(&working_copy_path),
+        "contents",
+    )
+    .unwrap();
 
     // Create a tree from the working copy. Only dir1/file2 should be updated in the
     // tree because dir1/file1 is ignored.

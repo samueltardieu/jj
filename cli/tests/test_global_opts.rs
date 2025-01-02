@@ -14,6 +14,8 @@
 
 use std::ffi::OsString;
 
+use indoc::indoc;
+
 use crate::common::get_stderr_string;
 use crate::common::strip_last_line;
 use crate::common::TestEnvironment;
@@ -306,7 +308,7 @@ fn test_invalid_filesets_looking_like_filepaths() {
       |     ^---
       |
       = expected `~` or <primary>
-    Hint: See https://martinvonz.github.io/jj/latest/filesets/ for filesets syntax, or for how to match file paths.
+    Hint: See https://jj-vcs.github.io/jj/latest/filesets/ for filesets syntax, or for how to match file paths.
     "#);
 
     test_env.add_config(r#"ui.allow-filesets=false"#);
@@ -402,30 +404,23 @@ fn test_color_config() {
     ◆  0000000000000000000000000000000000000000
     "###);
 
-    // Test that --config-toml 'ui.color="never"' overrides the config.
+    // Test that --config 'ui.color=never' overrides the config.
     let stdout = test_env.jj_cmd_success(
         &repo_path,
-        &[
-            "--config-toml",
-            "ui.color=\"never\"",
-            "log",
-            "-T",
-            "commit_id",
-        ],
+        &["--config=ui.color=never", "log", "-T", "commit_id"],
     );
     insta::assert_snapshot!(stdout, @r###"
     @  230dd059e1b059aefc0da06a2e5a7dbf22362f22
     ◆  0000000000000000000000000000000000000000
     "###);
 
-    // --color overrides --config-toml 'ui.color=...'.
+    // --color overrides --config 'ui.color=...'.
     let stdout = test_env.jj_cmd_success(
         &repo_path,
         &[
             "--color",
             "never",
-            "--config-toml",
-            "ui.color=\"always\"",
+            "--config=ui.color=always",
             "log",
             "-T",
             "commit_id",
@@ -437,7 +432,7 @@ fn test_color_config() {
     "###);
 
     // Test that NO_COLOR does NOT override the request for color in the config file
-    test_env.add_env_var("NO_COLOR", "");
+    test_env.add_env_var("NO_COLOR", "1");
     let stdout = test_env.jj_cmd_success(&repo_path, &["log", "-T", "commit_id"]);
     insta::assert_snapshot!(stdout, @r###"
     [1m[38;5;2m@[0m  [38;5;4m230dd059e1b059aefc0da06a2e5a7dbf22362f22[39m
@@ -455,6 +450,22 @@ fn test_color_config() {
     @  230dd059e1b059aefc0da06a2e5a7dbf22362f22
     ◆  0000000000000000000000000000000000000000
     "###);
+
+    // Invalid --color
+    let stderr = test_env.jj_cmd_cli_error(&repo_path, &["log", "--color=foo"]);
+    insta::assert_snapshot!(stderr, @r"
+    error: invalid value 'foo' for '--color <WHEN>': unknown variant `foo`, expected one of `always`, `never`, `debug`, `auto`
+
+    For more information, try '--help'.
+    ");
+    // Invalid ui.color
+    let stderr = test_env.jj_cmd_failure(&repo_path, &["log", "--config=ui.color=true"]);
+    insta::assert_snapshot!(stderr, @r"
+    Config error: Invalid type or value for ui.color
+    Caused by: wanted string or table
+
+    For help, see https://jj-vcs.github.io/jj/latest/config/.
+    ");
 }
 
 #[test]
@@ -500,7 +511,7 @@ fn test_color_ui_messages() {
         &[
             "log",
             "-r@|@--",
-            "--config-toml=templates.log_node='commit_id'",
+            "--config=templates.log_node=commit_id",
             "-Tdescription",
         ],
     );
@@ -559,14 +570,117 @@ fn test_early_args() {
     let stdout = test_env.jj_cmd_success(test_env.env_root(), &["help", "--color=always"]);
     insta::assert_snapshot!(stdout.lines().find(|l| l.contains("Commands:")).unwrap(), @"[1m[4mCommands:[0m");
 
+    // Check that early args are accepted after -h/--help
+    let stdout = test_env.jj_cmd_success(test_env.env_root(), &["-h", "--color=always"]);
+    insta::assert_snapshot!(
+        stdout.lines().find(|l| l.contains("Usage:")).unwrap(),
+        @"[1m[4mUsage:[0m [1mjj[0m [OPTIONS] <COMMAND>");
+    let stdout = test_env.jj_cmd_success(test_env.env_root(), &["log", "--help", "--color=always"]);
+    insta::assert_snapshot!(
+        stdout.lines().find(|l| l.contains("Usage:")).unwrap(),
+        @"[1m[4mUsage:[0m [1mjj log[0m [OPTIONS] [FILESETS]...");
+
     // Early args are parsed with clap's ignore_errors(), but there is a known
     // bug that causes defaults to be unpopulated. Test that the early args are
     // tolerant of this bug and don't cause a crash.
     test_env.jj_cmd_success(test_env.env_root(), &["--no-pager", "help"]);
-    test_env.jj_cmd_success(
+    test_env.jj_cmd_success(test_env.env_root(), &["--config=ui.color=always", "help"]);
+}
+
+#[test]
+fn test_config_args() {
+    let test_env = TestEnvironment::default();
+    let list_config = |args: &[&str]| {
+        // Suppress deprecation warning of --config-toml
+        let (stdout, _stderr) = test_env.jj_cmd_ok(
+            test_env.env_root(),
+            &[&["config", "list", "--include-overridden", "test"], args].concat(),
+        );
+        stdout
+    };
+
+    std::fs::write(
+        test_env.env_root().join("file1.toml"),
+        indoc! {"
+            test.key1 = 'file1'
+            test.key2 = 'file1'
+        "},
+    )
+    .unwrap();
+    std::fs::write(
+        test_env.env_root().join("file2.toml"),
+        indoc! {"
+            test.key3 = 'file2'
+        "},
+    )
+    .unwrap();
+
+    let stdout = list_config(&["--config=test.key1=arg1"]);
+    insta::assert_snapshot!(stdout, @r#"test.key1 = "arg1""#);
+    let stdout = list_config(&["--config-toml=test.key1='arg1'"]);
+    insta::assert_snapshot!(stdout, @"test.key1 = 'arg1'");
+    let stdout = list_config(&["--config-file=file1.toml"]);
+    insta::assert_snapshot!(stdout, @r"
+    test.key1 = 'file1'
+    test.key2 = 'file1'
+    ");
+
+    // --config items are inserted to a single layer internally
+    let stdout = list_config(&[
+        "--config=test.key1='arg1'",
+        "--config=test.key2.sub=true",
+        "--config=test.key1=arg3",
+    ]);
+    insta::assert_snapshot!(stdout, @r#"
+    test.key1 = "arg3"
+    test.key2.sub = true
+    "#);
+
+    // --config* arguments are processed in order of appearance
+    let stdout = list_config(&[
+        "--config=test.key1=arg1",
+        "--config-file=file1.toml",
+        "--config-toml=test.key2='arg3'",
+        "--config-file=file2.toml",
+    ]);
+    insta::assert_snapshot!(stdout, @r##"
+    # test.key1 = "arg1"
+    test.key1 = 'file1'
+    # test.key2 = 'file1'
+    test.key2 = 'arg3'
+    test.key3 = 'file2'
+    "##);
+
+    let (stdout, stderr) = test_env.jj_cmd_ok(
         test_env.env_root(),
-        &["--config-toml", "ui.color = 'always'", "help"],
+        &["config", "list", "foo", "--config-toml=foo='bar'"],
     );
+    insta::assert_snapshot!(stdout, @"foo = 'bar'");
+    insta::assert_snapshot!(
+        stderr,
+        @"Warning: --config-toml is deprecated; use --config or --config-file instead.");
+
+    let stderr = test_env.jj_cmd_failure(test_env.env_root(), &["config", "list", "--config=foo"]);
+    insta::assert_snapshot!(stderr, @r"
+    Config error: --config must be specified as NAME=VALUE
+    For help, see https://jj-vcs.github.io/jj/latest/config/.
+    ");
+
+    let stderr = test_env.jj_cmd_failure(
+        test_env.env_root(),
+        &["config", "list", "--config-file=unknown.toml"],
+    );
+    insta::with_settings!({
+        filters => [("(?m)^([2-9]): .*", "$1: <redacted>")],
+    }, {
+        insta::assert_snapshot!(stderr, @r"
+        Config error: Failed to read configuration file
+        Caused by:
+        1: Cannot access unknown.toml
+        2: <redacted>
+        For help, see https://jj-vcs.github.io/jj/latest/config/.
+        ");
+    });
 }
 
 #[test]
@@ -576,10 +690,88 @@ fn test_invalid_config() {
 
     test_env.add_config("[section]key = value-missing-quotes");
     let stderr = test_env.jj_cmd_failure(test_env.env_root(), &["init", "repo"]);
-    insta::assert_snapshot!(stderr.replace('\\', "/"), @r###"
-    Config error: expected newline, found an identifier at line 1 column 10 in config/config0002.toml
-    For help, see https://martinvonz.github.io/jj/latest/config/.
-    "###);
+    insta::assert_snapshot!(stderr, @r"
+    Config error: Configuration cannot be parsed as TOML document
+    Caused by: TOML parse error at line 1, column 10
+      |
+    1 | [section]key = value-missing-quotes
+      |          ^
+    invalid table header
+    expected newline, `#`
+
+    Hint: Check the config file: $TEST_ENV/config/config0002.toml
+    For help, see https://jj-vcs.github.io/jj/latest/config/.
+    ");
+}
+
+#[test]
+fn test_invalid_config_value() {
+    // Test that we get a reasonable error if a config value is invalid
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
+    let repo_path = test_env.env_root().join("repo");
+
+    let stderr =
+        test_env.jj_cmd_failure(&repo_path, &["status", "--config=snapshot.auto-track=[0]"]);
+    insta::assert_snapshot!(stderr, @r"
+    Config error: Invalid type or value for snapshot.auto-track
+    Caused by: invalid type: sequence, expected a string
+
+    For help, see https://jj-vcs.github.io/jj/latest/config/.
+    ");
+}
+
+#[test]
+#[cfg_attr(windows, ignore = "dirs::home_dir() can't be overridden by $HOME")] // TODO
+fn test_conditional_config() {
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.home_dir(), &["git", "init", "repo1"]);
+    test_env.jj_cmd_ok(test_env.home_dir(), &["git", "init", "repo2"]);
+    test_env.add_config(indoc! {"
+        aliases.foo = ['new', 'root()', '-mglobal']
+        [[--scope]]
+        --when.repositories = ['~']
+        aliases.foo = ['new', 'root()', '-mhome']
+        [[--scope]]
+        --when.repositories = ['~/repo1']
+        aliases.foo = ['new', 'root()', '-mrepo1']
+    "});
+
+    // Sanity check
+    let stdout = test_env.jj_cmd_success(
+        test_env.env_root(),
+        &["config", "list", "--include-overridden", "aliases"],
+    );
+    insta::assert_snapshot!(stdout, @"aliases.foo = ['new', 'root()', '-mglobal']");
+    let stdout = test_env.jj_cmd_success(
+        &test_env.home_dir().join("repo1"),
+        &["config", "list", "--include-overridden", "aliases"],
+    );
+    insta::assert_snapshot!(stdout, @r"
+    # aliases.foo = ['new', 'root()', '-mglobal']
+    # aliases.foo = ['new', 'root()', '-mhome']
+    aliases.foo = ['new', 'root()', '-mrepo1']
+    ");
+    let stdout = test_env.jj_cmd_success(
+        &test_env.home_dir().join("repo2"),
+        &["config", "list", "--include-overridden", "aliases"],
+    );
+    insta::assert_snapshot!(stdout, @r"
+    # aliases.foo = ['new', 'root()', '-mglobal']
+    aliases.foo = ['new', 'root()', '-mhome']
+    ");
+
+    // Aliases can be expanded by using the conditional tables
+    let (_stdout, stderr) = test_env.jj_cmd_ok(&test_env.home_dir().join("repo1"), &["foo"]);
+    insta::assert_snapshot!(stderr, @r"
+    Working copy now at: royxmykx 82899b03 (empty) repo1
+    Parent commit      : zzzzzzzz 00000000 (empty) (no description set)
+    ");
+    let (_stdout, stderr) = test_env.jj_cmd_ok(&test_env.home_dir().join("repo2"), &["foo"]);
+    insta::assert_snapshot!(stderr, @r"
+    Working copy now at: yqosqzyt 3bd315a9 (empty) home
+    Parent commit      : zzzzzzzz 00000000 (empty) (no description set)
+    ");
 }
 
 #[test]
@@ -632,15 +824,15 @@ fn test_help() {
     let test_env = TestEnvironment::default();
 
     let stdout = test_env.jj_cmd_success(test_env.env_root(), &["diffedit", "-h"]);
-    insta::assert_snapshot!(stdout, @r#"
+    insta::assert_snapshot!(stdout, @r###"
     Touch up the content changes in a revision with a diff editor
 
     Usage: jj diffedit [OPTIONS]
 
     Options:
-      -r, --revision <REVISION>  The revision to touch up
-          --from <FROM>          Show changes from this revision
-          --to <TO>              Edit changes in this revision
+      -r, --revision <REVSET>    The revision to touch up
+      -f, --from <REVSET>        Show changes from this revision
+      -t, --to <REVSET>          Edit changes in this revision
           --tool <NAME>          Specify diff editor to be used
           --restore-descendants  Preserve the content (not the diff) when rebasing descendants
       -h, --help                 Print help (see more with '--help')
@@ -654,8 +846,9 @@ fn test_help() {
           --color <WHEN>                 When to colorize output (always, never, debug, auto)
           --quiet                        Silence non-primary command output
           --no-pager                     Disable the pager
-          --config-toml <TOML>           Additional configuration options (can be repeated)
-    "#);
+          --config <NAME=VALUE>          Additional configuration options (can be repeated)
+          --config-file <PATH>           Additional configuration files (can be repeated)
+    "###);
 }
 
 #[test]

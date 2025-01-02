@@ -16,12 +16,15 @@
 #![allow(clippy::let_unit_value)]
 
 use std::any::Any;
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::error::Error;
 use std::fs;
+use std::fs::DirEntry;
 use std::fs::File;
 use std::fs::Metadata;
 use std::fs::OpenOptions;
+use std::io;
 use std::io::Read;
 use std::io::Write;
 use std::iter;
@@ -35,8 +38,10 @@ use std::slice;
 use std::sync::mpsc::channel;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::UNIX_EPOCH;
 
+use either::Either;
 use futures::StreamExt;
 use itertools::EitherOrBoth;
 use itertools::Itertools;
@@ -44,6 +49,7 @@ use once_cell::unsync::OnceCell;
 use pollster::FutureExt;
 use prost::Message;
 use rayon::iter::IntoParallelIterator;
+use rayon::prelude::IndexedParallelIterator;
 use rayon::prelude::ParallelIterator;
 use tempfile::NamedTempFile;
 use thiserror::Error;
@@ -60,9 +66,12 @@ use crate::backend::TreeId;
 use crate::backend::TreeValue;
 use crate::commit::Commit;
 use crate::conflicts;
-use crate::conflicts::materialize_merge_result;
+use crate::conflicts::choose_materialized_conflict_marker_len;
+use crate::conflicts::materialize_merge_result_to_bytes_with_marker_len;
 use crate::conflicts::materialize_tree_value;
+use crate::conflicts::ConflictMarkerStyle;
 use crate::conflicts::MaterializedTreeValue;
+use crate::conflicts::MIN_CONFLICT_MARKER_LEN;
 use crate::file_util::check_symlink_support;
 use crate::file_util::try_symlink;
 #[cfg(feature = "watchman")]
@@ -90,16 +99,18 @@ use crate::op_store::WorkspaceId;
 use crate::repo_path::RepoPath;
 use crate::repo_path::RepoPathBuf;
 use crate::repo_path::RepoPathComponent;
-use crate::settings::HumanByteSize;
 use crate::store::Store;
 use crate::tree::Tree;
 use crate::working_copy::CheckoutError;
+use crate::working_copy::CheckoutOptions;
 use crate::working_copy::CheckoutStats;
 use crate::working_copy::LockedWorkingCopy;
 use crate::working_copy::ResetError;
 use crate::working_copy::SnapshotError;
 use crate::working_copy::SnapshotOptions;
 use crate::working_copy::SnapshotProgress;
+use crate::working_copy::SnapshotStats;
+use crate::working_copy::UntrackedReason;
 use crate::working_copy::WorkingCopy;
 use crate::working_copy::WorkingCopyFactory;
 use crate::working_copy::WorkingCopyStateError;
@@ -116,17 +127,31 @@ pub enum FileType {
     GitSubmodule,
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct MaterializedConflictData {
+    pub conflict_marker_len: u32,
+}
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct FileState {
     pub file_type: FileType,
     pub mtime: MillisSinceEpoch,
     pub size: u64,
+    pub materialized_conflict_data: Option<MaterializedConflictData>,
     /* TODO: What else do we need here? Git stores a lot of fields.
      * TODO: Could possibly handle case-insensitive file systems keeping an
      *       Option<PathBuf> with the actual path here. */
 }
 
 impl FileState {
+    /// Check whether a file state appears clean compared to a previous file
+    /// state, ignoring materialized conflict data.
+    pub fn is_clean(&self, old_file_state: &Self) -> bool {
+        self.file_type == old_file_state.file_type
+            && self.mtime == old_file_state.mtime
+            && self.size == old_file_state.size
+    }
+
     /// Indicates that a file exists in the tree but that it needs to be
     /// re-stat'ed on the next snapshot.
     fn placeholder() -> Self {
@@ -138,10 +163,16 @@ impl FileState {
             file_type: FileType::Normal { executable },
             mtime: MillisSinceEpoch(0),
             size: 0,
+            materialized_conflict_data: None,
         }
     }
 
-    fn for_file(executable: bool, size: u64, metadata: &Metadata) -> Self {
+    fn for_file(
+        executable: bool,
+        size: u64,
+        metadata: &Metadata,
+        materialized_conflict_data: Option<MaterializedConflictData>,
+    ) -> Self {
         #[cfg(windows)]
         let executable = {
             // Windows doesn't support executable bit.
@@ -151,6 +182,7 @@ impl FileState {
             file_type: FileType::Normal { executable },
             mtime: mtime_from_metadata(metadata),
             size,
+            materialized_conflict_data,
         }
     }
 
@@ -162,6 +194,7 @@ impl FileState {
             file_type: FileType::Symlink,
             mtime: mtime_from_metadata(metadata),
             size: metadata.len(),
+            materialized_conflict_data: None,
         }
     }
 
@@ -170,6 +203,7 @@ impl FileState {
             file_type: FileType::GitSubmodule,
             mtime: MillisSinceEpoch(0),
             size: 0,
+            materialized_conflict_data: None,
         }
     }
 }
@@ -265,6 +299,13 @@ impl<'a> FileStates<'a> {
         Self::from_sorted(&self.data[range])
     }
 
+    /// Faster version of `prefixed("<dir>/<base>")`. Requires that all entries
+    /// share the same prefix `dir`.
+    fn prefixed_at(&self, dir: &RepoPath, base: &RepoPathComponent) -> Self {
+        let range = self.prefixed_range_at(dir, base);
+        Self::from_sorted(&self.data[range])
+    }
+
     /// Returns true if this contains no entries.
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
@@ -282,9 +323,33 @@ impl<'a> FileStates<'a> {
         Some(state)
     }
 
+    /// Faster version of `get("<dir>/<name>")`. Requires that all entries share
+    /// the same prefix `dir`.
+    fn get_at(&self, dir: &RepoPath, name: &RepoPathComponent) -> Option<FileState> {
+        let pos = self.exact_position_at(dir, name)?;
+        let (_, state) = file_state_entry_from_proto(&self.data[pos]);
+        Some(state)
+    }
+
     fn exact_position(&self, path: &RepoPath) -> Option<usize> {
         self.data
             .binary_search_by(|entry| RepoPath::from_internal_string(&entry.path).cmp(path))
+            .ok()
+    }
+
+    fn exact_position_at(&self, dir: &RepoPath, name: &RepoPathComponent) -> Option<usize> {
+        debug_assert!(self.paths().all(|path| path.starts_with(dir)));
+        let slash_len = !dir.is_root() as usize;
+        let prefix_len = dir.as_internal_file_string().len() + slash_len;
+        self.data
+            .binary_search_by(|entry| {
+                let tail = entry.path.get(prefix_len..).unwrap_or("");
+                match tail.split_once('/') {
+                    // "<name>/*" > "<name>"
+                    Some((pre, _)) => pre.cmp(name.as_internal_str()).then(Ordering::Greater),
+                    None => tail.cmp(name.as_internal_str()),
+                }
+            })
             .ok()
     }
 
@@ -294,6 +359,23 @@ impl<'a> FileStates<'a> {
             .partition_point(|entry| RepoPath::from_internal_string(&entry.path) < base);
         let len = self.data[start..]
             .partition_point(|entry| RepoPath::from_internal_string(&entry.path).starts_with(base));
+        start..(start + len)
+    }
+
+    fn prefixed_range_at(&self, dir: &RepoPath, base: &RepoPathComponent) -> Range<usize> {
+        debug_assert!(self.paths().all(|path| path.starts_with(dir)));
+        let slash_len = !dir.is_root() as usize;
+        let prefix_len = dir.as_internal_file_string().len() + slash_len;
+        let start = self.data.partition_point(|entry| {
+            let tail = entry.path.get(prefix_len..).unwrap_or("");
+            let entry_name = tail.split_once('/').map_or(tail, |(name, _)| name);
+            entry_name < base.as_internal_str()
+        });
+        let len = self.data[start..].partition_point(|entry| {
+            let tail = entry.path.get(prefix_len..).unwrap_or("");
+            let entry_name = tail.split_once('/').map_or(tail, |(name, _)| name);
+            entry_name == base.as_internal_str()
+        });
         start..(start + len)
     }
 
@@ -361,6 +443,11 @@ fn file_state_from_proto(proto: &crate::protos::working_copy::FileState) -> File
         file_type,
         mtime: MillisSinceEpoch(proto.mtime_millis_since_epoch),
         size: proto.size,
+        materialized_conflict_data: proto.materialized_conflict_data.as_ref().map(|data| {
+            MaterializedConflictData {
+                conflict_marker_len: data.conflict_marker_len,
+            }
+        }),
     }
 }
 
@@ -379,6 +466,11 @@ fn file_state_to_proto(file_state: &FileState) -> crate::protos::working_copy::F
     proto.file_type = file_type as i32;
     proto.mtime_millis_since_epoch = file_state.mtime.0;
     proto.size = file_state.size;
+    proto.materialized_conflict_data = file_state.materialized_conflict_data.map(|data| {
+        crate::protos::working_copy::MaterializedConflictData {
+            conflict_marker_len: data.conflict_marker_len,
+        }
+    });
     proto
 }
 
@@ -425,10 +517,14 @@ fn sparse_patterns_from_proto(
 }
 
 /// Creates intermediate directories from the `working_copy_path` to the
-/// `repo_path` parent.
+/// `repo_path` parent. Returns disk path for the `repo_path` file.
 ///
-/// If an intermediate directory exists and if it is a symlink, this function
-/// will return an error. The `working_copy_path` directory may be a symlink.
+/// If an intermediate directory exists and if it is a file or symlink, this
+/// function returns `Ok(None)` to signal that the path should be skipped.
+/// The `working_copy_path` directory may be a symlink.
+///
+/// If an existing or newly-created sub directory points to ".git" or ".jj",
+/// this function returns an error.
 ///
 /// Note that this does not prevent TOCTOU bugs caused by concurrent checkouts.
 /// Another process may remove the directory created by this function and put a
@@ -436,33 +532,144 @@ fn sparse_patterns_from_proto(
 fn create_parent_dirs(
     working_copy_path: &Path,
     repo_path: &RepoPath,
-) -> Result<bool, CheckoutError> {
-    let parent_path = repo_path.parent().expect("repo path shouldn't be root");
+) -> Result<Option<PathBuf>, CheckoutError> {
+    let (parent_path, basename) = repo_path.split().expect("repo path shouldn't be root");
     let mut dir_path = working_copy_path.to_owned();
     for c in parent_path.components() {
-        dir_path.push(c.as_str());
-        match fs::create_dir(&dir_path) {
-            Ok(()) => {}
-            Err(_)
-                if dir_path
-                    .symlink_metadata()
-                    .map(|m| m.is_dir())
-                    .unwrap_or(false) => {}
-            Err(err) => {
-                if dir_path.is_file() {
-                    return Ok(true);
+        // Ensure that the name is a normal entry of the current dir_path.
+        dir_path.push(c.to_fs_name().map_err(|err| err.with_path(repo_path))?);
+        // A directory named ".git" or ".jj" can be temporarily created. It
+        // might trick workspace path discovery, but is harmless so long as the
+        // directory is empty.
+        let new_dir_created = match fs::create_dir(&dir_path) {
+            Ok(()) => true, // New directory
+            Err(err) => match dir_path.symlink_metadata() {
+                Ok(m) if m.is_dir() => false, // Existing directory
+                Ok(_) => {
+                    return Ok(None); // Skip existing file or symlink
                 }
+                Err(_) => {
+                    return Err(CheckoutError::Other {
+                        message: format!(
+                            "Failed to create parent directories for {}",
+                            repo_path.to_fs_path_unchecked(working_copy_path).display(),
+                        ),
+                        err: err.into(),
+                    })
+                }
+            },
+        };
+        // Invalid component (e.g. "..") should have been rejected.
+        // The current dir_path should be an entry of dir_path.parent().
+        reject_reserved_existing_path(&dir_path).inspect_err(|_| {
+            if new_dir_created {
+                fs::remove_dir(&dir_path).ok();
+            }
+        })?;
+    }
+
+    let mut file_path = dir_path;
+    file_path.push(
+        basename
+            .to_fs_name()
+            .map_err(|err| err.with_path(repo_path))?,
+    );
+    Ok(Some(file_path))
+}
+
+/// Removes existing file named `disk_path` if any. Returns `Ok(true)` if the
+/// file was there and got removed, meaning that new file can be safely created.
+///
+/// If the existing file points to ".git" or ".jj", this function returns an
+/// error.
+fn remove_old_file(disk_path: &Path) -> Result<bool, CheckoutError> {
+    reject_reserved_existing_path(disk_path)?;
+    match fs::remove_file(disk_path) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        // TODO: Use io::ErrorKind::IsADirectory if it gets stabilized
+        Err(_) if disk_path.symlink_metadata().is_ok_and(|m| m.is_dir()) => Ok(false),
+        Err(err) => Err(CheckoutError::Other {
+            message: format!("Failed to remove file {}", disk_path.display()),
+            err: err.into(),
+        }),
+    }
+}
+
+/// Checks if new file or symlink named `disk_path` can be created.
+///
+/// If the file already exists, this function return `Ok(false)` to signal
+/// that the path should be skipped.
+///
+/// If the path may point to ".git" or ".jj" entry, this function returns an
+/// error.
+///
+/// This function can fail if `disk_path.parent()` isn't a directory.
+fn can_create_new_file(disk_path: &Path) -> Result<bool, CheckoutError> {
+    // New file or symlink will be created by caller. If it were pointed to by
+    // name ".git" or ".jj", git/jj CLI could be tricked to load configuration
+    // from an attacker-controlled location. So we first test the path by
+    // creating an empty file.
+    let new_file_created = match OpenOptions::new()
+        .write(true)
+        .create_new(true) // Don't overwrite, don't follow symlink
+        .open(disk_path)
+    {
+        Ok(_) => true,
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => false,
+        // Workaround for "Access is denied. (os error 5)" error on Windows.
+        Err(_) => match disk_path.symlink_metadata() {
+            Ok(_) => false,
+            Err(err) => {
                 return Err(CheckoutError::Other {
-                    message: format!(
-                        "Failed to create parent directories for {}",
-                        repo_path.to_fs_path(working_copy_path).display(),
-                    ),
+                    message: format!("Failed to stat {}", disk_path.display()),
+                    err: err.into(),
+                })
+            }
+        },
+    };
+    reject_reserved_existing_path(disk_path).inspect_err(|_| {
+        if new_file_created {
+            fs::remove_file(disk_path).ok();
+        }
+    })?;
+    if new_file_created {
+        fs::remove_file(disk_path).map_err(|err| CheckoutError::Other {
+            message: format!("Failed to remove temporary file {}", disk_path.display()),
+            err: err.into(),
+        })?;
+    }
+    Ok(new_file_created)
+}
+
+const RESERVED_DIR_NAMES: &[&str] = &[".git", ".jj"];
+
+/// Suppose the `disk_path` exists, checks if the last component points to
+/// ".git" or ".jj" in the same parent directory.
+fn reject_reserved_existing_path(disk_path: &Path) -> Result<(), CheckoutError> {
+    let parent_dir_path = disk_path.parent().expect("content path shouldn't be root");
+    for name in RESERVED_DIR_NAMES {
+        let reserved_path = parent_dir_path.join(name);
+        match same_file::is_same_file(disk_path, &reserved_path) {
+            Ok(true) => {
+                return Err(CheckoutError::ReservedPathComponent {
+                    path: disk_path.to_owned(),
+                    name,
+                });
+            }
+            Ok(false) => {}
+            // If the existing disk_path pointed to the reserved path, the
+            // reserved path would exist.
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(CheckoutError::Other {
+                    message: format!("Failed to validate path {}", disk_path.display()),
                     err: err.into(),
                 });
             }
         }
     }
-    Ok(false)
+    Ok(())
 }
 
 fn mtime_from_metadata(metadata: &Metadata) -> MillisSinceEpoch {
@@ -504,6 +711,7 @@ fn file_state(metadata: &Metadata) -> Option<FileState> {
             file_type,
             mtime,
             size,
+            materialized_conflict_data: None,
         }
     })
 }
@@ -513,35 +721,19 @@ struct FsmonitorMatcher {
     watchman_clock: Option<crate::protos::working_copy::WatchmanClock>,
 }
 
-struct DirectoryToVisit<'a> {
-    dir: RepoPathBuf,
-    disk_dir: PathBuf,
-    git_ignore: Arc<GitIgnoreFile>,
-    file_states: FileStates<'a>,
-}
-
 #[derive(Debug, Error)]
 pub enum TreeStateError {
     #[error("Reading tree state from {path}")]
-    ReadTreeState {
-        path: PathBuf,
-        source: std::io::Error,
-    },
+    ReadTreeState { path: PathBuf, source: io::Error },
     #[error("Decoding tree state from {path}")]
     DecodeTreeState {
         path: PathBuf,
         source: prost::DecodeError,
     },
     #[error("Writing tree state to temporary file {path}")]
-    WriteTreeState {
-        path: PathBuf,
-        source: std::io::Error,
-    },
+    WriteTreeState { path: PathBuf, source: io::Error },
     #[error("Persisting tree state to file {path}")]
-    PersistTreeState {
-        path: PathBuf,
-        source: std::io::Error,
-    },
+    PersistTreeState { path: PathBuf, source: io::Error },
     #[error("Filesystem monitor error")]
     Fsmonitor(#[source] Box<dyn Error + Send + Sync>),
 }
@@ -599,7 +791,7 @@ impl TreeState {
     ) -> Result<TreeState, TreeStateError> {
         let tree_state_path = state_path.join("tree_state");
         let file = match File::open(&tree_state_path) {
-            Err(ref err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Err(ref err) if err.kind() == io::ErrorKind::NotFound => {
                 return TreeState::init(store, working_copy_path, state_path);
             }
             Err(err) => {
@@ -709,48 +901,6 @@ impl TreeState {
         self.store.get_root_tree(&self.tree_id)
     }
 
-    async fn write_file_to_store(
-        &self,
-        path: &RepoPath,
-        disk_path: &Path,
-    ) -> Result<FileId, SnapshotError> {
-        let mut file = File::open(disk_path).map_err(|err| SnapshotError::Other {
-            message: format!("Failed to open file {}", disk_path.display()),
-            err: err.into(),
-        })?;
-        Ok(self.store.write_file(path, &mut file).await?)
-    }
-
-    async fn write_symlink_to_store(
-        &self,
-        path: &RepoPath,
-        disk_path: &Path,
-    ) -> Result<SymlinkId, SnapshotError> {
-        if self.symlink_support {
-            let target = disk_path.read_link().map_err(|err| SnapshotError::Other {
-                message: format!("Failed to read symlink {}", disk_path.display()),
-                err: err.into(),
-            })?;
-            let str_target =
-                target
-                    .to_str()
-                    .ok_or_else(|| SnapshotError::InvalidUtf8SymlinkTarget {
-                        path: disk_path.to_path_buf(),
-                    })?;
-            Ok(self.store.write_symlink(path, str_target).await?)
-        } else {
-            let target = fs::read(disk_path).map_err(|err| SnapshotError::Other {
-                message: format!("Failed to read file {}", disk_path.display()),
-                err: err.into(),
-            })?;
-            let string_target =
-                String::from_utf8(target).map_err(|_| SnapshotError::InvalidUtf8SymlinkTarget {
-                    path: disk_path.to_path_buf(),
-                })?;
-            Ok(self.store.write_symlink(path, &string_target).await?)
-        }
-    }
-
     fn reset_watchman(&mut self) {
         self.watchman_clock.take();
     }
@@ -788,17 +938,24 @@ impl TreeState {
             .await
             .map_err(|err| TreeStateError::Fsmonitor(Box::new(err)))
     }
+}
 
+/// Functions to snapshot local-disk files to the store.
+impl TreeState {
     /// Look for changes to the working copy. If there are any changes, create
-    /// a new tree from it and return it, and also update the dirstate on disk.
+    /// a new tree from it.
     #[instrument(skip_all)]
-    pub fn snapshot(&mut self, options: &SnapshotOptions) -> Result<bool, SnapshotError> {
-        let SnapshotOptions {
-            base_ignores,
-            fsmonitor_settings,
+    pub fn snapshot(
+        &mut self,
+        options: &SnapshotOptions,
+    ) -> Result<(bool, SnapshotStats), SnapshotError> {
+        let &SnapshotOptions {
+            ref base_ignores,
+            ref fsmonitor_settings,
             progress,
             start_tracking_matcher,
             max_new_file_size,
+            conflict_marker_style,
         } = options;
 
         let sparse_matcher = self.sparse_matcher();
@@ -816,66 +973,63 @@ impl TreeState {
 
         let matcher = IntersectionMatcher::new(sparse_matcher.as_ref(), fsmonitor_matcher);
         if matcher.visit(RepoPath::root()).is_nothing() {
-            // No need to iterate file states to build empty deleted_files.
+            // No need to load the current tree, set up channels, etc.
             self.watchman_clock = watchman_clock;
-            return Ok(is_dirty);
+            return Ok((is_dirty, SnapshotStats::default()));
         }
 
         let (tree_entries_tx, tree_entries_rx) = channel();
         let (file_states_tx, file_states_rx) = channel();
-        let (present_files_tx, present_files_rx) = channel();
+        let (untracked_paths_tx, untracked_paths_rx) = channel();
+        let (deleted_files_tx, deleted_files_rx) = channel();
 
         trace_span!("traverse filesystem").in_scope(|| -> Result<(), SnapshotError> {
-            let current_tree = self.current_tree()?;
+            let snapshotter = FileSnapshotter {
+                tree_state: self,
+                current_tree: &self.current_tree()?,
+                matcher: &matcher,
+                start_tracking_matcher,
+                // Move tx sides so they'll be dropped at the end of the scope.
+                tree_entries_tx,
+                file_states_tx,
+                untracked_paths_tx,
+                deleted_files_tx,
+                error: OnceLock::new(),
+                progress,
+                max_new_file_size,
+                conflict_marker_style,
+            };
             let directory_to_visit = DirectoryToVisit {
                 dir: RepoPathBuf::root(),
                 disk_dir: self.working_copy_path.clone(),
                 git_ignore: base_ignores.clone(),
                 file_states: self.file_states.all(),
             };
-            self.visit_directory(
-                &matcher,
-                start_tracking_matcher,
-                &current_tree,
-                tree_entries_tx,
-                file_states_tx,
-                present_files_tx,
-                directory_to_visit,
-                *progress,
-                *max_new_file_size,
-            )
+            // Here we use scope as a queue of per-directory jobs.
+            rayon::scope(|scope| {
+                snapshotter.spawn_ok(scope, |scope| {
+                    snapshotter.visit_directory(directory_to_visit, scope)
+                });
+            });
+            snapshotter.into_result()
         })?;
 
+        let stats = SnapshotStats {
+            untracked_paths: untracked_paths_rx.into_iter().collect(),
+        };
         let mut tree_builder = MergedTreeBuilder::new(self.tree_id.clone());
-        let mut deleted_files: HashSet<_> =
-            trace_span!("collecting existing files").in_scope(|| {
-                // Since file_states shouldn't contain files excluded by the sparse patterns,
-                // fsmonitor_matcher here is identical to the intersected matcher.
-                let file_states = self.file_states.all();
-                file_states
-                    .iter()
-                    .filter(|(path, state)| {
-                        fsmonitor_matcher.matches(path) && state.file_type != FileType::GitSubmodule
-                    })
-                    .map(|(path, _state)| path.to_owned())
-                    .collect()
-            });
-        trace_span!("process tree entries").in_scope(|| -> Result<(), SnapshotError> {
-            while let Ok((path, tree_values)) = tree_entries_rx.recv() {
+        trace_span!("process tree entries").in_scope(|| {
+            for (path, tree_values) in &tree_entries_rx {
                 tree_builder.set_or_remove(path, tree_values);
             }
-            Ok(())
-        })?;
-        trace_span!("process present files").in_scope(|| {
-            while let Ok(path) = present_files_rx.recv() {
-                deleted_files.remove(&path);
-            }
         });
-        trace_span!("process deleted tree entries").in_scope(|| {
+        let deleted_files = trace_span!("process deleted tree entries").in_scope(|| {
+            let deleted_files = HashSet::from_iter(deleted_files_rx);
             is_dirty |= !deleted_files.is_empty();
             for file in &deleted_files {
                 tree_builder.set_or_remove(file.clone(), Merge::absent());
             }
+            deleted_files
         });
         trace_span!("process file states").in_scope(|| {
             let changed_file_states = file_states_rx
@@ -902,188 +1056,7 @@ impl TreeState {
             assert_eq!(state_paths, tree_paths);
         }
         self.watchman_clock = watchman_clock;
-        Ok(is_dirty)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn visit_directory(
-        &self,
-        matcher: &dyn Matcher,
-        start_tracking_matcher: &dyn Matcher,
-        current_tree: &MergedTree,
-        tree_entries_tx: Sender<(RepoPathBuf, MergedTreeValue)>,
-        file_states_tx: Sender<(RepoPathBuf, FileState)>,
-        present_files_tx: Sender<RepoPathBuf>,
-        directory_to_visit: DirectoryToVisit,
-        progress: Option<&SnapshotProgress>,
-        max_new_file_size: u64,
-    ) -> Result<(), SnapshotError> {
-        let DirectoryToVisit {
-            dir,
-            disk_dir,
-            git_ignore,
-            file_states,
-        } = directory_to_visit;
-
-        if matcher.visit(&dir).is_nothing() {
-            return Ok(());
-        }
-
-        let git_ignore = git_ignore
-            .chain_with_file(&dir.to_internal_dir_string(), disk_dir.join(".gitignore"))?;
-        let dir_entries = disk_dir
-            .read_dir()
-            .unwrap()
-            .map(|maybe_entry| maybe_entry.unwrap())
-            .collect_vec();
-        dir_entries.into_par_iter().try_for_each_with(
-            (
-                tree_entries_tx.clone(),
-                file_states_tx.clone(),
-                present_files_tx.clone(),
-            ),
-            |(tree_entries_tx, file_states_tx, present_files_tx),
-             entry|
-             -> Result<(), SnapshotError> {
-                let file_type = entry.file_type().unwrap();
-                let file_name = entry.file_name();
-                let name = file_name
-                    .to_str()
-                    .ok_or_else(|| SnapshotError::InvalidUtf8Path {
-                        path: file_name.clone(),
-                    })?;
-
-                if name == ".jj" || name == ".git" {
-                    return Ok(());
-                }
-                let path = dir.join(RepoPathComponent::new(name));
-                let maybe_current_file_state = file_states.get(&path);
-                if let Some(file_state) = &maybe_current_file_state {
-                    if file_state.file_type == FileType::GitSubmodule {
-                        return Ok(());
-                    }
-                }
-
-                if file_type.is_dir() {
-                    let file_states = file_states.prefixed(&path);
-                    if git_ignore.matches(&path.to_internal_dir_string())
-                        || start_tracking_matcher.visit(&path).is_nothing()
-                    {
-                        // TODO: Report this directory to the caller if there are unignored paths we
-                        // should not start tracking.
-
-                        // If the whole directory is ignored, visit only paths we're already
-                        // tracking.
-                        for (tracked_path, current_file_state) in file_states {
-                            if !matcher.matches(tracked_path) {
-                                continue;
-                            }
-                            let disk_path = tracked_path.to_fs_path(&self.working_copy_path);
-                            let metadata = match disk_path.symlink_metadata() {
-                                Ok(metadata) => metadata,
-                                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                                    continue;
-                                }
-                                Err(err) => {
-                                    return Err(SnapshotError::Other {
-                                        message: format!(
-                                            "Failed to stat file {}",
-                                            disk_path.display()
-                                        ),
-                                        err: err.into(),
-                                    });
-                                }
-                            };
-                            if let Some(new_file_state) = file_state(&metadata) {
-                                present_files_tx.send(tracked_path.to_owned()).ok();
-                                let update = self.get_updated_tree_value(
-                                    tracked_path,
-                                    disk_path,
-                                    Some(&current_file_state),
-                                    current_tree,
-                                    &new_file_state,
-                                )?;
-                                if let Some(tree_value) = update {
-                                    tree_entries_tx
-                                        .send((tracked_path.to_owned(), tree_value))
-                                        .ok();
-                                }
-                                if new_file_state != current_file_state {
-                                    file_states_tx
-                                        .send((tracked_path.to_owned(), new_file_state))
-                                        .ok();
-                                }
-                            }
-                        }
-                    } else {
-                        let directory_to_visit = DirectoryToVisit {
-                            dir: path,
-                            disk_dir: entry.path(),
-                            git_ignore: git_ignore.clone(),
-                            file_states,
-                        };
-                        self.visit_directory(
-                            matcher,
-                            start_tracking_matcher,
-                            current_tree,
-                            tree_entries_tx.clone(),
-                            file_states_tx.clone(),
-                            present_files_tx.clone(),
-                            directory_to_visit,
-                            progress,
-                            max_new_file_size,
-                        )?;
-                    }
-                } else if matcher.matches(&path) {
-                    if let Some(progress) = progress {
-                        progress(&path);
-                    }
-                    if maybe_current_file_state.is_none()
-                        && git_ignore.matches(path.as_internal_file_string())
-                    {
-                        // If it wasn't already tracked and it matches
-                        // the ignored paths, then ignore it.
-                    } else if maybe_current_file_state.is_none()
-                        && !start_tracking_matcher.matches(&path)
-                    {
-                        // Leave the file untracked
-                        // TODO: Report this path to the caller
-                    } else {
-                        let metadata = entry.metadata().map_err(|err| SnapshotError::Other {
-                            message: format!("Failed to stat file {}", entry.path().display()),
-                            err: err.into(),
-                        })?;
-                        if maybe_current_file_state.is_none() && metadata.len() > max_new_file_size
-                        {
-                            // TODO: Maybe leave the file untracked instead
-                            return Err(SnapshotError::NewFileTooLarge {
-                                path: entry.path().clone(),
-                                size: HumanByteSize(metadata.len()),
-                                max_size: HumanByteSize(max_new_file_size),
-                            });
-                        }
-                        if let Some(new_file_state) = file_state(&metadata) {
-                            present_files_tx.send(path.clone()).ok();
-                            let update = self.get_updated_tree_value(
-                                &path,
-                                entry.path(),
-                                maybe_current_file_state.as_ref(),
-                                current_tree,
-                                &new_file_state,
-                            )?;
-                            if let Some(tree_value) = update {
-                                tree_entries_tx.send((path.clone(), tree_value)).ok();
-                            }
-                            if Some(&new_file_state) != maybe_current_file_state.as_ref() {
-                                file_states_tx.send((path, new_file_state)).ok();
-                            }
-                        }
-                    }
-                }
-                Ok(())
-            },
-        )?;
-        Ok(())
+        Ok((is_dirty, stats))
     }
 
     #[instrument(skip_all)]
@@ -1130,13 +1103,306 @@ impl TreeState {
             watchman_clock,
         })
     }
+}
+
+struct DirectoryToVisit<'a> {
+    dir: RepoPathBuf,
+    disk_dir: PathBuf,
+    git_ignore: Arc<GitIgnoreFile>,
+    file_states: FileStates<'a>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PresentDirEntryKind {
+    Dir,
+    File,
+}
+
+#[derive(Clone, Debug)]
+struct PresentDirEntries {
+    dirs: HashSet<String>,
+    files: HashSet<String>,
+}
+
+/// Helper to scan local-disk directories and files in parallel.
+struct FileSnapshotter<'a> {
+    tree_state: &'a TreeState,
+    current_tree: &'a MergedTree,
+    matcher: &'a dyn Matcher,
+    start_tracking_matcher: &'a dyn Matcher,
+    tree_entries_tx: Sender<(RepoPathBuf, MergedTreeValue)>,
+    file_states_tx: Sender<(RepoPathBuf, FileState)>,
+    untracked_paths_tx: Sender<(RepoPathBuf, UntrackedReason)>,
+    deleted_files_tx: Sender<RepoPathBuf>,
+    error: OnceLock<SnapshotError>,
+    progress: Option<&'a SnapshotProgress<'a>>,
+    max_new_file_size: u64,
+    conflict_marker_style: ConflictMarkerStyle,
+}
+
+impl FileSnapshotter<'_> {
+    fn spawn_ok<'scope, F>(&'scope self, scope: &rayon::Scope<'scope>, body: F)
+    where
+        F: FnOnce(&rayon::Scope<'scope>) -> Result<(), SnapshotError> + Send + 'scope,
+    {
+        scope.spawn(|scope| {
+            if self.error.get().is_some() {
+                return;
+            }
+            match body(scope) {
+                Ok(()) => {}
+                Err(err) => self.error.set(err).unwrap_or(()),
+            };
+        });
+    }
+
+    /// Extracts the result of the snapshot.
+    fn into_result(self) -> Result<(), SnapshotError> {
+        match self.error.into_inner() {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+
+    /// Visits the directory entries, spawns jobs to recurse into sub
+    /// directories.
+    fn visit_directory<'scope>(
+        &'scope self,
+        directory_to_visit: DirectoryToVisit<'scope>,
+        scope: &rayon::Scope<'scope>,
+    ) -> Result<(), SnapshotError> {
+        let DirectoryToVisit {
+            dir,
+            disk_dir,
+            git_ignore,
+            file_states,
+        } = directory_to_visit;
+
+        let git_ignore = git_ignore
+            .chain_with_file(&dir.to_internal_dir_string(), disk_dir.join(".gitignore"))?;
+        let dir_entries: Vec<_> = disk_dir
+            .read_dir()
+            .and_then(|entries| entries.try_collect())
+            .map_err(|err| SnapshotError::Other {
+                message: format!("Failed to read directory {}", disk_dir.display()),
+                err: err.into(),
+            })?;
+        let (dirs, files) = dir_entries
+            .into_par_iter()
+            // Don't split into too many small jobs. For a small directory,
+            // sequential scan should be fast enough.
+            .with_min_len(100)
+            .filter_map(|entry| {
+                self.process_dir_entry(&dir, &git_ignore, file_states, &entry, scope)
+                    .transpose()
+            })
+            .map(|item| match item {
+                Ok((PresentDirEntryKind::Dir, name)) => Ok(Either::Left(name)),
+                Ok((PresentDirEntryKind::File, name)) => Ok(Either::Right(name)),
+                Err(err) => Err(err),
+            })
+            .collect::<Result<_, _>>()?;
+        let present_entries = PresentDirEntries { dirs, files };
+        self.emit_deleted_files(&dir, file_states, &present_entries);
+        Ok(())
+    }
+
+    fn process_dir_entry<'scope>(
+        &'scope self,
+        dir: &RepoPath,
+        git_ignore: &Arc<GitIgnoreFile>,
+        file_states: FileStates<'scope>,
+        entry: &DirEntry,
+        scope: &rayon::Scope<'scope>,
+    ) -> Result<Option<(PresentDirEntryKind, String)>, SnapshotError> {
+        let file_type = entry.file_type().unwrap();
+        let file_name = entry.file_name();
+        let name_string = file_name
+            .into_string()
+            .map_err(|path| SnapshotError::InvalidUtf8Path { path })?;
+
+        if RESERVED_DIR_NAMES.contains(&name_string.as_str()) {
+            return Ok(None);
+        }
+        let name = RepoPathComponent::new(&name_string);
+        let path = dir.join(name);
+        let maybe_current_file_state = file_states.get_at(dir, name);
+        if let Some(file_state) = &maybe_current_file_state {
+            if file_state.file_type == FileType::GitSubmodule {
+                return Ok(None);
+            }
+        }
+
+        if file_type.is_dir() {
+            let file_states = file_states.prefixed_at(dir, name);
+            if git_ignore.matches(&path.to_internal_dir_string())
+                || self.start_tracking_matcher.visit(&path).is_nothing()
+            {
+                // TODO: Report this directory to the caller if there are unignored paths we
+                // should not start tracking.
+
+                // If the whole directory is ignored, visit only paths we're already
+                // tracking.
+                self.spawn_ok(scope, move |_| self.visit_tracked_files(file_states));
+            } else if !self.matcher.visit(&path).is_nothing() {
+                let directory_to_visit = DirectoryToVisit {
+                    dir: path,
+                    disk_dir: entry.path(),
+                    git_ignore: git_ignore.clone(),
+                    file_states,
+                };
+                self.spawn_ok(scope, |scope| {
+                    self.visit_directory(directory_to_visit, scope)
+                });
+            }
+            // Whether or not the directory path matches, any child file entries
+            // shouldn't be touched within the current recursion step.
+            Ok(Some((PresentDirEntryKind::Dir, name_string)))
+        } else if self.matcher.matches(&path) {
+            if let Some(progress) = self.progress {
+                progress(&path);
+            }
+            if maybe_current_file_state.is_none()
+                && git_ignore.matches(path.as_internal_file_string())
+            {
+                // If it wasn't already tracked and it matches
+                // the ignored paths, then ignore it.
+                Ok(None)
+            } else if maybe_current_file_state.is_none()
+                && !self.start_tracking_matcher.matches(&path)
+            {
+                // Leave the file untracked
+                // TODO: Report this path to the caller
+                Ok(None)
+            } else {
+                let metadata = entry.metadata().map_err(|err| SnapshotError::Other {
+                    message: format!("Failed to stat file {}", entry.path().display()),
+                    err: err.into(),
+                })?;
+                if maybe_current_file_state.is_none() && metadata.len() > self.max_new_file_size {
+                    // Leave the large file untracked
+                    let reason = UntrackedReason::FileTooLarge {
+                        size: metadata.len(),
+                        max_size: self.max_new_file_size,
+                    };
+                    self.untracked_paths_tx.send((path, reason)).ok();
+                    Ok(None)
+                } else if let Some(new_file_state) = file_state(&metadata) {
+                    self.process_present_file(
+                        path,
+                        &entry.path(),
+                        maybe_current_file_state.as_ref(),
+                        new_file_state,
+                    )?;
+                    Ok(Some((PresentDirEntryKind::File, name_string)))
+                } else {
+                    // Special file is not considered present
+                    Ok(None)
+                }
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Visits only paths we're already tracking.
+    fn visit_tracked_files(&self, file_states: FileStates<'_>) -> Result<(), SnapshotError> {
+        for (tracked_path, current_file_state) in file_states {
+            if !self.matcher.matches(tracked_path) {
+                continue;
+            }
+            let disk_path = tracked_path.to_fs_path(&self.tree_state.working_copy_path)?;
+            let metadata = match disk_path.symlink_metadata() {
+                Ok(metadata) => Some(metadata),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+                Err(err) => {
+                    return Err(SnapshotError::Other {
+                        message: format!("Failed to stat file {}", disk_path.display()),
+                        err: err.into(),
+                    });
+                }
+            };
+            if let Some(new_file_state) = metadata.as_ref().and_then(file_state) {
+                self.process_present_file(
+                    tracked_path.to_owned(),
+                    &disk_path,
+                    Some(&current_file_state),
+                    new_file_state,
+                )?;
+            } else {
+                self.deleted_files_tx.send(tracked_path.to_owned()).ok();
+            }
+        }
+        Ok(())
+    }
+
+    fn process_present_file(
+        &self,
+        path: RepoPathBuf,
+        disk_path: &Path,
+        maybe_current_file_state: Option<&FileState>,
+        mut new_file_state: FileState,
+    ) -> Result<(), SnapshotError> {
+        let update = self.get_updated_tree_value(
+            &path,
+            disk_path,
+            maybe_current_file_state,
+            &new_file_state,
+        )?;
+        // Preserve materialized conflict data for normal, non-resolved files
+        if matches!(new_file_state.file_type, FileType::Normal { .. })
+            && !update.as_ref().is_some_and(|update| update.is_resolved())
+        {
+            new_file_state.materialized_conflict_data =
+                maybe_current_file_state.and_then(|state| state.materialized_conflict_data);
+        }
+        if let Some(tree_value) = update {
+            self.tree_entries_tx.send((path.clone(), tree_value)).ok();
+        }
+        if Some(&new_file_state) != maybe_current_file_state {
+            self.file_states_tx.send((path, new_file_state)).ok();
+        }
+        Ok(())
+    }
+
+    /// Emits file paths that don't exist in the `present_entries`.
+    fn emit_deleted_files(
+        &self,
+        dir: &RepoPath,
+        file_states: FileStates<'_>,
+        present_entries: &PresentDirEntries,
+    ) {
+        let file_state_chunks = file_states.iter().chunk_by(|(path, _state)| {
+            // Extract <name> from <dir>, <dir>/<name>, or <dir>/<name>/**.
+            // (file_states may contain <dir> file on file->dir transition.)
+            debug_assert!(path.starts_with(dir));
+            let slash = !dir.is_root() as usize;
+            let len = dir.as_internal_file_string().len() + slash;
+            let tail = path.as_internal_file_string().get(len..).unwrap_or("");
+            match tail.split_once('/') {
+                Some((name, _)) => (PresentDirEntryKind::Dir, name),
+                None => (PresentDirEntryKind::File, tail),
+            }
+        });
+        file_state_chunks
+            .into_iter()
+            .filter(|&((kind, name), _)| match kind {
+                PresentDirEntryKind::Dir => !present_entries.dirs.contains(name),
+                PresentDirEntryKind::File => !present_entries.files.contains(name),
+            })
+            .flat_map(|(_, chunk)| chunk)
+            // Whether or not the entry exists, submodule should be ignored
+            .filter(|(_, state)| state.file_type != FileType::GitSubmodule)
+            .filter(|(path, _)| self.matcher.matches(path))
+            .try_for_each(|(path, _)| self.deleted_files_tx.send(path.to_owned()))
+            .ok();
+    }
 
     fn get_updated_tree_value(
         &self,
         repo_path: &RepoPath,
-        disk_path: PathBuf,
+        disk_path: &Path,
         maybe_current_file_state: Option<&FileState>,
-        current_tree: &MergedTree,
         new_file_state: &FileState,
     ) -> Result<Option<MergedTreeValue>, SnapshotError> {
         let clean = match maybe_current_file_state {
@@ -1147,14 +1413,15 @@ impl TreeState {
             Some(current_file_state) => {
                 // If the file's mtime was set at the same time as this state file's own mtime,
                 // then we don't know if the file was modified before or after this state file.
-                current_file_state == new_file_state && current_file_state.mtime < self.own_mtime
+                new_file_state.is_clean(current_file_state)
+                    && current_file_state.mtime < self.tree_state.own_mtime
             }
         };
         if clean {
             Ok(None)
         } else {
-            let current_tree_values = current_tree.path_value(repo_path)?;
-            let new_file_type = if !self.symlink_support {
+            let current_tree_values = self.current_tree.path_value(repo_path)?;
+            let new_file_type = if !self.tree_state.symlink_support {
                 let mut new_file_type = new_file_state.file_type.clone();
                 if matches!(new_file_type, FileType::Normal { .. })
                     && matches!(current_tree_values.as_normal(), Some(TreeValue::Symlink(_)))
@@ -1167,11 +1434,17 @@ impl TreeState {
             };
             let new_tree_values = match new_file_type {
                 FileType::Normal { executable } => self
-                    .write_path_to_store(repo_path, &disk_path, &current_tree_values, executable)
+                    .write_path_to_store(
+                        repo_path,
+                        disk_path,
+                        &current_tree_values,
+                        executable,
+                        maybe_current_file_state.and_then(|state| state.materialized_conflict_data),
+                    )
                     .block_on()?,
                 FileType::Symlink => {
                     let id = self
-                        .write_symlink_to_store(repo_path, &disk_path)
+                        .write_symlink_to_store(repo_path, disk_path)
                         .block_on()?;
                     Merge::normal(TreeValue::Symlink(id))
                 }
@@ -1185,15 +1458,18 @@ impl TreeState {
         }
     }
 
+    fn store(&self) -> &Store {
+        &self.tree_state.store
+    }
+
     async fn write_path_to_store(
         &self,
         repo_path: &RepoPath,
         disk_path: &Path,
         current_tree_values: &MergedTreeValue,
         executable: FileExecutableFlag,
+        materialized_conflict_data: Option<MaterializedConflictData>,
     ) -> Result<MergedTreeValue, SnapshotError> {
-        // If the file contained a conflict before and is now a normal file on disk, we
-        // try to parse any conflict markers in the file into a conflict.
         if let Some(current_tree_value) = current_tree_values.as_resolved() {
             #[cfg(unix)]
             let _ = current_tree_value; // use the variable
@@ -1210,15 +1486,22 @@ impl TreeState {
             };
             Ok(Merge::normal(TreeValue::File { id, executable }))
         } else if let Some(old_file_ids) = current_tree_values.to_file_merge() {
+            // If the file contained a conflict before and is a normal file on
+            // disk, we try to parse any conflict markers in the file into a
+            // conflict.
             let content = fs::read(disk_path).map_err(|err| SnapshotError::Other {
                 message: format!("Failed to open file {}", disk_path.display()),
                 err: err.into(),
             })?;
             let new_file_ids = conflicts::update_from_content(
                 &old_file_ids,
-                self.store.as_ref(),
+                self.store(),
                 repo_path,
                 &content,
+                self.conflict_marker_style,
+                materialized_conflict_data.map_or(MIN_CONFLICT_MARKER_LEN, |data| {
+                    data.conflict_marker_len as usize
+                }),
             )
             .block_on()?;
             match new_file_ids.into_resolved() {
@@ -1251,6 +1534,51 @@ impl TreeState {
         }
     }
 
+    async fn write_file_to_store(
+        &self,
+        path: &RepoPath,
+        disk_path: &Path,
+    ) -> Result<FileId, SnapshotError> {
+        let mut file = File::open(disk_path).map_err(|err| SnapshotError::Other {
+            message: format!("Failed to open file {}", disk_path.display()),
+            err: err.into(),
+        })?;
+        Ok(self.store().write_file(path, &mut file).await?)
+    }
+
+    async fn write_symlink_to_store(
+        &self,
+        path: &RepoPath,
+        disk_path: &Path,
+    ) -> Result<SymlinkId, SnapshotError> {
+        if self.tree_state.symlink_support {
+            let target = disk_path.read_link().map_err(|err| SnapshotError::Other {
+                message: format!("Failed to read symlink {}", disk_path.display()),
+                err: err.into(),
+            })?;
+            let str_target =
+                target
+                    .to_str()
+                    .ok_or_else(|| SnapshotError::InvalidUtf8SymlinkTarget {
+                        path: disk_path.to_path_buf(),
+                    })?;
+            Ok(self.store().write_symlink(path, str_target).await?)
+        } else {
+            let target = fs::read(disk_path).map_err(|err| SnapshotError::Other {
+                message: format!("Failed to read file {}", disk_path.display()),
+                err: err.into(),
+            })?;
+            let string_target =
+                String::from_utf8(target).map_err(|_| SnapshotError::InvalidUtf8SymlinkTarget {
+                    path: disk_path.to_path_buf(),
+                })?;
+            Ok(self.store().write_symlink(path, &string_target).await?)
+        }
+    }
+}
+
+/// Functions to update local-disk files from the store.
+impl TreeState {
     fn write_file(
         &self,
         disk_path: &Path,
@@ -1265,7 +1593,7 @@ impl TreeState {
                 message: format!("Failed to open file {} for writing", disk_path.display()),
                 err: err.into(),
             })?;
-        let size = std::io::copy(contents, &mut file).map_err(|err| CheckoutError::Other {
+        let size = io::copy(contents, &mut file).map_err(|err| CheckoutError::Other {
             message: format!("Failed to write file {}", disk_path.display()),
             err: err.into(),
         })?;
@@ -1277,7 +1605,7 @@ impl TreeState {
         let metadata = file
             .metadata()
             .map_err(|err| checkout_error_for_stat_error(err, disk_path))?;
-        Ok(FileState::for_file(executable, size, &metadata))
+        Ok(FileState::for_file(executable, size, &metadata, None))
     }
 
     fn write_symlink(&self, disk_path: &Path, target: String) -> Result<FileState, CheckoutError> {
@@ -1301,6 +1629,7 @@ impl TreeState {
         disk_path: &Path,
         conflict_data: Vec<u8>,
         executable: bool,
+        materialized_conflict_data: Option<MaterializedConflictData>,
     ) -> Result<FileState, CheckoutError> {
         let mut file = OpenOptions::new()
             .write(true)
@@ -1320,7 +1649,12 @@ impl TreeState {
         let metadata = file
             .metadata()
             .map_err(|err| checkout_error_for_stat_error(err, disk_path))?;
-        Ok(FileState::for_file(executable, size, &metadata))
+        Ok(FileState::for_file(
+            executable,
+            size,
+            &metadata,
+            materialized_conflict_data,
+        ))
     }
 
     #[cfg_attr(windows, allow(unused_variables))]
@@ -1334,7 +1668,11 @@ impl TreeState {
         Ok(())
     }
 
-    pub fn check_out(&mut self, new_tree: &MergedTree) -> Result<CheckoutStats, CheckoutError> {
+    pub fn check_out(
+        &mut self,
+        new_tree: &MergedTree,
+        options: &CheckoutOptions,
+    ) -> Result<CheckoutStats, CheckoutError> {
         let old_tree = self.current_tree().map_err(|err| match err {
             err @ BackendError::ObjectNotFound { .. } => CheckoutError::SourceNotFound {
                 source: Box::new(err),
@@ -1342,7 +1680,12 @@ impl TreeState {
             other => CheckoutError::InternalBackendError(other),
         })?;
         let stats = self
-            .update(&old_tree, new_tree, self.sparse_matcher().as_ref())
+            .update(
+                &old_tree,
+                new_tree,
+                self.sparse_matcher().as_ref(),
+                options.conflict_marker_style,
+            )
             .block_on()?;
         self.tree_id = new_tree.id();
         Ok(stats)
@@ -1351,6 +1694,7 @@ impl TreeState {
     pub fn set_sparse_patterns(
         &mut self,
         sparse_patterns: Vec<RepoPathBuf>,
+        options: &CheckoutOptions,
     ) -> Result<CheckoutStats, CheckoutError> {
         let tree = self.current_tree().map_err(|err| match err {
             err @ BackendError::ObjectNotFound { .. } => CheckoutError::SourceNotFound {
@@ -1363,9 +1707,21 @@ impl TreeState {
         let added_matcher = DifferenceMatcher::new(&new_matcher, &old_matcher);
         let removed_matcher = DifferenceMatcher::new(&old_matcher, &new_matcher);
         let empty_tree = MergedTree::resolved(Tree::empty(self.store.clone(), RepoPathBuf::root()));
-        let added_stats = self.update(&empty_tree, &tree, &added_matcher).block_on()?;
+        let added_stats = self
+            .update(
+                &empty_tree,
+                &tree,
+                &added_matcher,
+                options.conflict_marker_style,
+            )
+            .block_on()?;
         let removed_stats = self
-            .update(&tree, &empty_tree, &removed_matcher)
+            .update(
+                &tree,
+                &empty_tree,
+                &removed_matcher,
+                options.conflict_marker_style,
+            )
             .block_on()?;
         self.sparse_patterns = sparse_patterns;
         assert_eq!(added_stats.updated_files, 0);
@@ -1386,6 +1742,7 @@ impl TreeState {
         old_tree: &MergedTree,
         new_tree: &MergedTree,
         matcher: &dyn Matcher,
+        conflict_marker_style: ConflictMarkerStyle,
     ) -> Result<CheckoutStats, CheckoutError> {
         // TODO: maybe it's better not include the skipped counts in the "intended"
         // counts
@@ -1397,46 +1754,60 @@ impl TreeState {
         };
         let mut changed_file_states = Vec::new();
         let mut deleted_files = HashSet::new();
-        let mut diff_stream = Box::pin(
-            old_tree
-                .diff_stream(new_tree, matcher)
-                .map(|TreeDiffEntry { path, values }| async {
-                    match values {
-                        Ok((before, after)) => {
-                            let result = materialize_tree_value(&self.store, &path, after).await;
-                            (path, result.map(|value| (before.is_present(), value)))
-                        }
-                        Err(err) => (path, Err(err)),
+        let mut diff_stream = old_tree
+            .diff_stream(new_tree, matcher)
+            .map(|TreeDiffEntry { path, values }| async {
+                match values {
+                    Ok((before, after)) => {
+                        let result = materialize_tree_value(&self.store, &path, after).await;
+                        (path, result.map(|value| (before, value)))
                     }
-                })
-                .buffered(self.store.concurrency().max(1)),
-        );
+                    Err(err) => (path, Err(err)),
+                }
+            })
+            .buffered(self.store.concurrency().max(1));
         while let Some((path, data)) = diff_stream.next().await {
-            let (present_before, after) = data?;
+            let (before, after) = data?;
             if after.is_absent() {
                 stats.removed_files += 1;
-            } else if !present_before {
+            } else if before.is_absent() {
                 stats.added_files += 1;
             } else {
                 stats.updated_files += 1;
             }
-            let disk_path = path.to_fs_path(&self.working_copy_path);
 
-            if present_before {
-                fs::remove_file(&disk_path).ok();
-            } else if disk_path.exists() {
+            // Existing Git submodule can be a non-empty directory on disk. We
+            // shouldn't attempt to manage it as a tracked path.
+            //
+            // TODO: It might be better to add general support for paths not
+            // tracked by jj than processing submodules specially. For example,
+            // paths excluded by .gitignore can be marked as such so that
+            // newly-"unignored" paths won't be snapshotted automatically.
+            if matches!(before.as_normal(), Some(TreeValue::GitSubmodule(_)))
+                && matches!(after, MaterializedTreeValue::GitSubmodule(_))
+            {
+                eprintln!("ignoring git submodule at {path:?}");
+                // Not updating the file state as if there were no diffs. Leave
+                // the state type as FileType::GitSubmodule if it was before.
+                continue;
+            }
+
+            // Create parent directories no matter if after.is_present(). This
+            // ensures that the path never traverses symlinks.
+            let Some(disk_path) = create_parent_dirs(&self.working_copy_path, &path)? else {
+                changed_file_states.push((path, FileState::placeholder()));
+                stats.skipped_files += 1;
+                continue;
+            };
+            // If the path was present, check reserved path first and delete it.
+            let present_file_deleted = before.is_present() && remove_old_file(&disk_path)?;
+            // If not, create temporary file to test the path validity.
+            if !present_file_deleted && !can_create_new_file(&disk_path)? {
                 changed_file_states.push((path, FileState::placeholder()));
                 stats.skipped_files += 1;
                 continue;
             }
-            if after.is_present() {
-                let skip = create_parent_dirs(&self.working_copy_path, &path)?;
-                if skip {
-                    changed_file_states.push((path, FileState::placeholder()));
-                    stats.skipped_files += 1;
-                    continue;
-                }
-            }
+
             // TODO: Check that the file has not changed before overwriting/removing it.
             let file_state = match after {
                 MaterializedTreeValue::Absent | MaterializedTreeValue::AccessDenied(_) => {
@@ -1474,17 +1845,29 @@ impl TreeState {
                     contents,
                     executable,
                 } => {
-                    let mut data = vec![];
-                    materialize_merge_result(&contents, &mut data)
-                        .expect("Failed to materialize conflict to in-memory buffer");
-                    self.write_conflict(&disk_path, data, executable)?
+                    let conflict_marker_len = choose_materialized_conflict_marker_len(&contents);
+                    let data = materialize_merge_result_to_bytes_with_marker_len(
+                        &contents,
+                        conflict_marker_style,
+                        conflict_marker_len,
+                    )
+                    .into();
+                    let materialized_conflict_data = MaterializedConflictData {
+                        conflict_marker_len: conflict_marker_len.try_into().unwrap_or(u32::MAX),
+                    };
+                    self.write_conflict(
+                        &disk_path,
+                        data,
+                        executable,
+                        Some(materialized_conflict_data),
+                    )?
                 }
                 MaterializedTreeValue::OtherConflict { id } => {
                     // Unless all terms are regular files, we can't do much
                     // better than trying to describe the merge.
                     let data = id.describe().into_bytes();
                     let executable = false;
-                    self.write_conflict(&disk_path, data, executable)?
+                    self.write_conflict(&disk_path, data, executable, None)?
                 }
             };
             changed_file_states.push((path, file_state));
@@ -1540,6 +1923,7 @@ impl TreeState {
                     file_type,
                     mtime: MillisSinceEpoch(0),
                     size: 0,
+                    materialized_conflict_data: None,
                 };
                 changed_file_states.push((path, file_state));
             }
@@ -1557,7 +1941,7 @@ impl TreeState {
     }
 }
 
-fn checkout_error_for_stat_error(err: std::io::Error, path: &Path) -> CheckoutError {
+fn checkout_error_for_stat_error(err: io::Error, path: &Path) -> CheckoutError {
     CheckoutError::Other {
         message: format!("Failed to stat file {}", path.display()),
         err: err.into(),
@@ -1606,7 +1990,10 @@ impl WorkingCopy for LocalWorkingCopy {
 
     fn start_mutation(&self) -> Result<Box<dyn LockedWorkingCopy>, WorkingCopyStateError> {
         let lock_path = self.state_path.join("working_copy.lock");
-        let lock = FileLock::lock(lock_path);
+        let lock = FileLock::lock(lock_path).map_err(|err| WorkingCopyStateError {
+            message: "Failed to lock working copy".to_owned(),
+            err: err.into(),
+        })?;
 
         let wc = LocalWorkingCopy {
             store: self.store.clone(),
@@ -1846,7 +2233,10 @@ impl LockedWorkingCopy for LockedLocalWorkingCopy {
         &self.old_tree_id
     }
 
-    fn snapshot(&mut self, options: &SnapshotOptions) -> Result<MergedTreeId, SnapshotError> {
+    fn snapshot(
+        &mut self,
+        options: &SnapshotOptions,
+    ) -> Result<(MergedTreeId, SnapshotStats), SnapshotError> {
         let tree_state = self
             .wc
             .tree_state_mut()
@@ -1854,11 +2244,16 @@ impl LockedWorkingCopy for LockedLocalWorkingCopy {
                 message: "Failed to read the working copy state".to_string(),
                 err: err.into(),
             })?;
-        self.tree_state_dirty |= tree_state.snapshot(options)?;
-        Ok(tree_state.current_tree_id().clone())
+        let (is_dirty, stats) = tree_state.snapshot(options)?;
+        self.tree_state_dirty |= is_dirty;
+        Ok((tree_state.current_tree_id().clone(), stats))
     }
 
-    fn check_out(&mut self, commit: &Commit) -> Result<CheckoutStats, CheckoutError> {
+    fn check_out(
+        &mut self,
+        commit: &Commit,
+        options: &CheckoutOptions,
+    ) -> Result<CheckoutStats, CheckoutError> {
         // TODO: Write a "pending_checkout" file with the new TreeId so we can
         // continue an interrupted update if we find such a file.
         let new_tree = commit.tree()?;
@@ -1869,7 +2264,7 @@ impl LockedWorkingCopy for LockedLocalWorkingCopy {
                 message: "Failed to load the working copy state".to_string(),
                 err: err.into(),
             })?
-            .check_out(&new_tree)?;
+            .check_out(&new_tree, options)?;
         self.tree_state_dirty = true;
         Ok(stats)
     }
@@ -1913,6 +2308,7 @@ impl LockedWorkingCopy for LockedLocalWorkingCopy {
     fn set_sparse_patterns(
         &mut self,
         new_sparse_patterns: Vec<RepoPathBuf>,
+        options: &CheckoutOptions,
     ) -> Result<CheckoutStats, CheckoutError> {
         // TODO: Write a "pending_checkout" file with new sparse patterns so we can
         // continue an interrupted update if we find such a file.
@@ -1923,7 +2319,7 @@ impl LockedWorkingCopy for LockedLocalWorkingCopy {
                 message: "Failed to load the working copy state".to_string(),
                 err: err.into(),
             })?
-            .set_sparse_patterns(new_sparse_patterns)?;
+            .set_sparse_patterns(new_sparse_patterns, options)?;
         self.tree_state_dirty = true;
         Ok(stats)
     }
@@ -1987,6 +2383,7 @@ mod tests {
             },
             mtime: MillisSinceEpoch(0),
             size,
+            materialized_conflict_data: None,
         };
         let new_static_entry = |path: &'static str, size| (repo_path(path), new_state(size));
         let new_owned_entry = |path: &str, size| (repo_path(path).to_owned(), new_state(size));
@@ -2035,6 +2432,7 @@ mod tests {
             },
             mtime: MillisSinceEpoch(0),
             size,
+            materialized_conflict_data: None,
         };
         let new_proto_entry = |path: &str, size| {
             file_state_entry_to_proto(repo_path(path).to_owned(), &new_state(size))
@@ -2089,5 +2487,83 @@ mod tests {
         assert_eq!(file_states.get(repo_path("b/d/e")), Some(new_state(2)));
         assert_eq!(file_states.get(repo_path("bc")), Some(new_state(5)));
         assert_eq!(file_states.get(repo_path("z")), None);
+    }
+
+    #[test]
+    fn test_file_states_lookup_at() {
+        let new_state = |size| FileState {
+            file_type: FileType::Normal {
+                executable: FileExecutableFlag::default(),
+            },
+            mtime: MillisSinceEpoch(0),
+            size,
+            materialized_conflict_data: None,
+        };
+        let new_proto_entry = |path: &str, size| {
+            file_state_entry_to_proto(repo_path(path).to_owned(), &new_state(size))
+        };
+        let data = vec![
+            new_proto_entry("b/c", 0),
+            new_proto_entry("b/d/e", 1),
+            new_proto_entry("b/d#", 2), // '#' < '/'
+            new_proto_entry("b/e", 3),
+            new_proto_entry("b#", 4), // '#' < '/'
+        ];
+        let file_states = FileStates::from_sorted(&data);
+
+        // At root
+        assert_eq!(
+            file_states.get_at(RepoPath::root(), RepoPathComponent::new("b")),
+            None
+        );
+        assert_eq!(
+            file_states.get_at(RepoPath::root(), RepoPathComponent::new("b#")),
+            Some(new_state(4))
+        );
+
+        // At prefixed dir
+        let prefixed_states =
+            file_states.prefixed_at(RepoPath::root(), RepoPathComponent::new("b"));
+        assert_eq!(
+            prefixed_states.paths().collect_vec(),
+            ["b/c", "b/d/e", "b/d#", "b/e"].map(repo_path)
+        );
+        assert_eq!(
+            prefixed_states.get_at(repo_path("b"), RepoPathComponent::new("c")),
+            Some(new_state(0))
+        );
+        assert_eq!(
+            prefixed_states.get_at(repo_path("b"), RepoPathComponent::new("d")),
+            None
+        );
+        assert_eq!(
+            prefixed_states.get_at(repo_path("b"), RepoPathComponent::new("d#")),
+            Some(new_state(2))
+        );
+
+        // At nested prefixed dir
+        let prefixed_states =
+            prefixed_states.prefixed_at(repo_path("b"), RepoPathComponent::new("d"));
+        assert_eq!(
+            prefixed_states.paths().collect_vec(),
+            ["b/d/e"].map(repo_path)
+        );
+        assert_eq!(
+            prefixed_states.get_at(repo_path("b/d"), RepoPathComponent::new("e")),
+            Some(new_state(1))
+        );
+        assert_eq!(
+            prefixed_states.get_at(repo_path("b/d"), RepoPathComponent::new("#")),
+            None
+        );
+
+        // At prefixed file
+        let prefixed_states =
+            file_states.prefixed_at(RepoPath::root(), RepoPathComponent::new("b#"));
+        assert_eq!(prefixed_states.paths().collect_vec(), ["b#"].map(repo_path));
+        assert_eq!(
+            prefixed_states.get_at(repo_path("b#"), RepoPathComponent::new("#")),
+            None
+        );
     }
 }

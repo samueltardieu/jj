@@ -29,12 +29,13 @@ use crate::ui::Ui;
 /// List the recursive entries of a tree.
 #[derive(clap::Args, Clone, Debug)]
 pub struct DebugTreeArgs {
-    #[arg(long, short = 'r')]
+    #[arg(long, short = 'r', value_name = "REVSET")]
     revision: Option<RevisionArg>,
     #[arg(long, conflicts_with = "revision")]
     id: Option<String>,
     #[arg(long, requires = "id")]
     dir: Option<String>,
+    #[arg(value_name = "FILESETS")]
     paths: Vec<String>,
     // TODO: Add an option to include trees that are ancestors of the matched paths
 }
@@ -54,7 +55,7 @@ pub fn cmd_debug_tree(
             RepoPathBuf::root()
         };
         let store = workspace_command.repo().store();
-        let tree = store.get_tree(&dir, &tree_id)?;
+        let tree = store.get_tree(dir, &tree_id)?;
         MergedTree::resolved(tree)
     } else {
         let commit = workspace_command

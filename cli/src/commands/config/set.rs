@@ -14,28 +14,34 @@
 
 use std::io;
 
+use clap_complete::ArgValueCandidates;
 use jj_lib::commit::Commit;
+use jj_lib::config::ConfigNamePathBuf;
+use jj_lib::config::ConfigValue;
 use jj_lib::repo::Repo;
 use tracing::instrument;
 
 use super::ConfigLevelArgs;
-use crate::cli_util::get_new_config_file_path;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::WorkspaceCommandHelper;
-use crate::command_error::user_error;
+use crate::command_error::user_error_with_message;
 use crate::command_error::CommandError;
-use crate::config::parse_toml_value_or_bare_string;
-use crate::config::write_config_value_to_file;
-use crate::config::ConfigNamePathBuf;
+use crate::complete;
+use crate::config::parse_value_or_bare_string;
 use crate::ui::Ui;
 
 /// Update config file to set the given option to a given value.
 #[derive(clap::Args, Clone, Debug)]
 pub struct ConfigSetArgs {
-    #[arg(required = true)]
+    #[arg(required = true, add = ArgValueCandidates::new(complete::leaf_config_keys))]
     name: ConfigNamePathBuf,
-    #[arg(required = true)]
-    value: String,
+    /// New value to set
+    ///
+    /// The value should be specified as a TOML expression. If string value
+    /// doesn't contain any TOML constructs (such as array notation), quotes can
+    /// be omitted.
+    #[arg(required = true, value_parser = parse_value_or_bare_string)]
+    value: ConfigValue,
     #[command(flatten)]
     level: ConfigLevelArgs,
 }
@@ -52,26 +58,20 @@ pub fn cmd_config_set(
     command: &CommandHelper,
     args: &ConfigSetArgs,
 ) -> Result<(), CommandError> {
-    let config_path = get_new_config_file_path(&args.level.expect_source_kind(), command)?;
-    if config_path.is_dir() {
-        return Err(user_error(format!(
-            "Can't set config in path {path} (dirs not supported)",
-            path = config_path.display()
-        )));
-    }
-
-    // TODO(#531): Infer types based on schema (w/ --type arg to override).
-    let value = parse_toml_value_or_bare_string(&args.value);
+    let mut file = args.level.edit_config_file(command)?;
 
     // If the user is trying to change the author config, we should warn them that
     // it won't affect the working copy author
     if args.name == ConfigNamePathBuf::from_iter(vec!["user", "name"]) {
-        check_wc_author(ui, command, &value, AuthorChange::Name)?;
+        check_wc_author(ui, command, &args.value, AuthorChange::Name)?;
     } else if args.name == ConfigNamePathBuf::from_iter(vec!["user", "email"]) {
-        check_wc_author(ui, command, &value, AuthorChange::Email)?;
+        check_wc_author(ui, command, &args.value, AuthorChange::Email)?;
     };
 
-    write_config_value_to_file(&args.name, value, &config_path)
+    file.set_value(&args.name, &args.value)
+        .map_err(|err| user_error_with_message(format!("Failed to set {}", args.name), err))?;
+    file.save()?;
+    Ok(())
 }
 
 /// Returns the commit of the working copy if it exists.

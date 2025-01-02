@@ -17,7 +17,13 @@ mod get;
 mod list;
 mod path;
 mod set;
+mod unset;
 
+use std::path::Path;
+
+use itertools::Itertools as _;
+use jj_lib::config::ConfigFile;
+use jj_lib::config::ConfigSource;
 use tracing::instrument;
 
 use self::edit::cmd_config_edit;
@@ -30,28 +36,27 @@ use self::path::cmd_config_path;
 use self::path::ConfigPathArgs;
 use self::set::cmd_config_set;
 use self::set::ConfigSetArgs;
+use self::unset::cmd_config_unset;
+use self::unset::ConfigUnsetArgs;
 use crate::cli_util::CommandHelper;
+use crate::command_error::user_error;
 use crate::command_error::CommandError;
-use crate::config::ConfigSource;
+use crate::config::ConfigEnv;
 use crate::ui::Ui;
 
 #[derive(clap::Args, Clone, Debug)]
-#[command(group = clap::ArgGroup::new("config_level").multiple(false).required(true))]
+#[group(id = "config_level", multiple = false, required = true)]
 pub(crate) struct ConfigLevelArgs {
     /// Target the user-level config
-    #[arg(long, group = "config_level")]
+    #[arg(long)]
     user: bool,
 
     /// Target the repo-level config
-    #[arg(long, group = "config_level")]
+    #[arg(long)]
     repo: bool,
 }
 
 impl ConfigLevelArgs {
-    fn expect_source_kind(&self) -> ConfigSource {
-        self.get_source_kind().expect("No config_level provided")
-    }
-
     fn get_source_kind(&self) -> Option<ConfigSource> {
         if self.user {
             Some(ConfigSource::User)
@@ -59,6 +64,51 @@ impl ConfigLevelArgs {
             Some(ConfigSource::Repo)
         } else {
             None
+        }
+    }
+
+    fn config_path<'a>(&self, config_env: &'a ConfigEnv) -> Result<&'a Path, CommandError> {
+        if self.user {
+            config_env
+                .user_config_path()
+                .ok_or_else(|| user_error("No user config path found"))
+        } else if self.repo {
+            config_env
+                .repo_config_path()
+                .ok_or_else(|| user_error("No repo config path found"))
+        } else {
+            panic!("No config_level provided")
+        }
+    }
+
+    fn edit_config_file(&self, command: &CommandHelper) -> Result<ConfigFile, CommandError> {
+        let config_env = command.config_env();
+        let config = command.raw_config();
+        let pick_one = |mut files: Vec<ConfigFile>, not_found_error: &str| {
+            if files.len() > 1 {
+                // TODO: prompt or pick the last?
+                return Err(user_error(format!(
+                    "Cannot determine config file to edit:\n{}",
+                    files
+                        .iter()
+                        .map(|file| format!("  {}", file.path().display()))
+                        .join("\n")
+                )));
+            }
+            files.pop().ok_or_else(|| user_error(not_found_error))
+        };
+        if self.user {
+            pick_one(
+                config_env.user_config_files(config)?,
+                "No user config path found to edit",
+            )
+        } else if self.repo {
+            pick_one(
+                config_env.repo_config_files(config)?,
+                "No repo config path found to edit",
+            )
+        } else {
+            panic!("No config_level provided")
         }
     }
 }
@@ -69,7 +119,7 @@ impl ConfigLevelArgs {
 /// environment variables.
 ///
 /// For file locations, supported config options, and other details about jj
-/// config, see https://martinvonz.github.io/jj/latest/config/.
+/// config, see https://jj-vcs.github.io/jj/latest/config/.
 #[derive(clap::Subcommand, Clone, Debug)]
 pub(crate) enum ConfigCommand {
     #[command(visible_alias("e"))]
@@ -82,6 +132,8 @@ pub(crate) enum ConfigCommand {
     Path(ConfigPathArgs),
     #[command(visible_alias("s"))]
     Set(ConfigSetArgs),
+    #[command(visible_alias("u"))]
+    Unset(ConfigUnsetArgs),
 }
 
 #[instrument(skip_all)]
@@ -96,5 +148,6 @@ pub(crate) fn cmd_config(
         ConfigCommand::List(args) => cmd_config_list(ui, command, args),
         ConfigCommand::Path(args) => cmd_config_path(ui, command, args),
         ConfigCommand::Set(args) => cmd_config_set(ui, command, args),
+        ConfigCommand::Unset(args) => cmd_config_unset(ui, command, args),
     }
 }

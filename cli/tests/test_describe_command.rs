@@ -57,7 +57,7 @@ fn test_describe() {
         std::fs::read_to_string(test_env.env_root().join("editor0")).unwrap(), @r###"
     description from CLI
 
-    JJ: Lines starting with "JJ: " (like this one) will be removed.
+    JJ: Lines starting with "JJ:" (like this one) will be removed.
     "###);
 
     // Set a description in editor
@@ -141,8 +141,43 @@ fn test_describe() {
     let stderr = test_env.jj_cmd_failure(&repo_path, &["describe"]);
     assert!(stderr.contains("exited with an error"));
 
+    // ignore everything after the first ignore-rest line
+    std::fs::write(
+        &edit_script,
+        indoc! {"
+            write
+            description from editor
+
+            content of message from editor
+            JJ: ignore-rest
+            content after ignore line should not be included
+            JJ: ignore-rest
+            ignore everything until EOF or next description
+        "},
+    )
+    .unwrap();
+    let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["describe"]);
+    insta::assert_snapshot!(stdout, @"");
+    insta::assert_snapshot!(stderr, @r#"
+    Working copy now at: qpvuntsm 10fa2dc7 (empty) description from editor
+    Parent commit      : zzzzzzzz 00000000 (empty) (no description set)
+    "#);
+    let stdout =
+        test_env.jj_cmd_success(&repo_path, &["log", "--no-graph", "-r@", "-Tdescription"]);
+    insta::assert_snapshot!(stdout, @r#"
+    description from editor
+
+    content of message from editor
+    "#);
+}
+
+#[test]
+fn test_describe_editor_env() {
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.env_root(), &["init", "repo", "--git"]);
+    let repo_path = test_env.env_root().join("repo");
+
     // Fails if the editor doesn't exist
-    std::fs::write(&edit_script, "").unwrap();
     let assert = test_env
         .jj_cmd(&repo_path, &["describe"])
         .env("EDITOR", "this-editor-does-not-exist")
@@ -198,7 +233,7 @@ fn test_describe_multiple_commits() {
     // Set the description of multiple commits using `-m` flag
     let (stdout, stderr) = test_env.jj_cmd_ok(
         &repo_path,
-        &["describe", "@", "@--", "-m", "description from CLI"],
+        &["describe", "-r@", "-r@--", "-m", "description from CLI"],
     );
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
@@ -218,7 +253,7 @@ fn test_describe_multiple_commits() {
     // each commit and doesn't update commits if no changes are made.
     // Commit descriptions are edited in topological order
     std::fs::write(&edit_script, "dump editor0").unwrap();
-    let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["describe", "@", "@-"]);
+    let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["describe", "-r@", "@-"]);
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
     Nothing changed.
@@ -378,6 +413,42 @@ fn test_describe_multiple_commits() {
     std::fs::write(&edit_script, "fail").unwrap();
     let stderr = test_env.jj_cmd_failure(&repo_path, &["describe", "@", "@-"]);
     assert!(stderr.contains("exited with an error"));
+
+    // describe lines should take priority over ignore-rest
+    std::fs::write(
+        &edit_script,
+        indoc! {"
+            write
+            JJ: describe 0d76a92ca7cc -------
+            description from editor for @-
+
+            JJ: ignore-rest
+            content after ignore-rest should not be included
+
+            JJ: describe a42f5755e688 -------
+            description from editor for @--
+
+            JJ: ignore-rest
+            each commit should skip their own ignore-rest
+        "},
+    )
+    .unwrap();
+    let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["describe", "@-", "@--"]);
+    insta::assert_snapshot!(stdout, @"");
+    insta::assert_snapshot!(stderr, @r#"
+    Updated 2 commits
+    Rebased 1 descendant commits
+    Working copy now at: kkmpptxz 1d7701ee (empty) description from editor of @
+    Parent commit      : rlvkpnrz 5389926e (empty) description from editor for @-
+    "#);
+    insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r#"
+    @  1d7701eec9bc description from editor of @
+    │
+    │  further commit message of @
+    ○  5389926ebed6 description from editor for @-
+    ○  eaa8547ae37a description from editor for @--
+    ◆  000000000000
+    "#);
 }
 
 #[test]
@@ -475,15 +546,13 @@ fn test_describe_default_description() {
     "###);
     insta::assert_snapshot!(
         std::fs::read_to_string(test_env.env_root().join("editor")).unwrap(), @r###"
-
-
     TESTED=TODO
 
     JJ: This commit contains the following changes:
     JJ:     A file1
     JJ:     A file2
 
-    JJ: Lines starting with "JJ: " (like this one) will be removed.
+    JJ: Lines starting with "JJ:" (like this one) will be removed.
     "###);
 }
 
@@ -566,15 +635,14 @@ fn test_describe_author() {
     ~
     "#);
     insta::assert_snapshot!(
-        std::fs::read_to_string(test_env.env_root().join("editor")).unwrap(), @r#"
-
+        std::fs::read_to_string(test_env.env_root().join("editor")).unwrap(), @r###"
     JJ: Author: Super Seeder <super.seeder@example.com> (2001-02-03 08:05:12)
     JJ: Committer: Test User <test.user@example.com> (2001-02-03 08:05:12)
 
     JJ: 0 files changed, 0 insertions(+), 0 deletions(-)
 
-    JJ: Lines starting with "JJ: " (like this one) will be removed.
-    "#);
+    JJ: Lines starting with "JJ:" (like this one) will be removed.
+    "###);
 
     // Change the author for multiple commits (the committer is always reset)
     test_env.jj_cmd_ok(
@@ -605,9 +673,8 @@ fn test_describe_author() {
         &repo_path,
         &[
             "describe",
-            "--config-toml",
-            r#"user.name = "Ove Ridder"
-            user.email = "ove.ridder@example.com""#,
+            "--config=user.name=Ove Ridder",
+            "--config=user.email=ove.ridder@example.com",
             "--no-edit",
             "--reset-author",
         ],
@@ -631,9 +698,8 @@ fn test_describe_author() {
             "describe",
             "@---",
             "@-",
-            "--config-toml",
-            r#"user.name = "Ove Ridder"
-            user.email = "ove.ridder@example.com""#,
+            "--config=user.name=Ove Ridder",
+            "--config=user.email=ove.ridder@example.com",
             "--reset-author",
         ],
     );

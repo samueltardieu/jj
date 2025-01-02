@@ -62,7 +62,7 @@ pub(crate) fn cmd_init(
     let cwd = command.cwd();
     let wc_path = cwd.join(&args.destination);
     let wc_path = file_util::create_or_reuse_dir(&wc_path)
-        .and_then(|_| wc_path.canonicalize())
+        .and_then(|_| dunce::canonicalize(wc_path))
         .map_err(|e| user_error_with_message("Failed to create workspace", e))?;
 
     // Preserve existing behaviour where `jj init` is not able to create
@@ -76,7 +76,7 @@ pub(crate) fn cmd_init(
 Use `jj git init` instead"
         )?;
     } else {
-        if !command.settings().allow_native_backend() {
+        if !command.settings().get_bool("ui.allow-init-native")? {
             return Err(user_error_with_hint(
                 "The native backend is disallowed by default.",
                 "Did you mean to call `jj git init`?

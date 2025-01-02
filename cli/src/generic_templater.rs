@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use crate::template_builder;
@@ -165,6 +166,29 @@ impl<'a, C: 'a> IntoTemplateProperty<'a> for GenericTemplatePropertyKind<'a, C> 
         match self {
             GenericTemplatePropertyKind::Core(property) => property.try_into_template(),
             GenericTemplatePropertyKind::Self_(_) => None,
+        }
+    }
+
+    fn try_into_eq(self, other: Self) -> Option<Box<dyn TemplateProperty<Output = bool> + 'a>> {
+        match (self, other) {
+            (GenericTemplatePropertyKind::Core(lhs), GenericTemplatePropertyKind::Core(rhs)) => {
+                lhs.try_into_eq(rhs)
+            }
+            (GenericTemplatePropertyKind::Core(_), _) => None,
+            (GenericTemplatePropertyKind::Self_(_), _) => None,
+        }
+    }
+
+    fn try_into_cmp(
+        self,
+        other: Self,
+    ) -> Option<Box<dyn TemplateProperty<Output = Ordering> + 'a>> {
+        match (self, other) {
+            (GenericTemplatePropertyKind::Core(lhs), GenericTemplatePropertyKind::Core(rhs)) => {
+                lhs.try_into_cmp(rhs)
+            }
+            (GenericTemplatePropertyKind::Core(_), _) => None,
+            (GenericTemplatePropertyKind::Self_(_), _) => None,
         }
     }
 }

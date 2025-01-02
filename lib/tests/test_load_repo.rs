@@ -22,23 +22,23 @@ fn test_load_at_operation() {
     let test_repo = TestRepo::init();
     let repo = &test_repo.repo;
 
-    let mut tx = repo.start_transaction(&settings);
-    let commit = write_random_commit(tx.repo_mut(), &settings);
-    let repo = tx.commit("add commit");
+    let mut tx = repo.start_transaction();
+    let commit = write_random_commit(tx.repo_mut());
+    let repo = tx.commit("add commit").unwrap();
 
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     tx.repo_mut().remove_head(commit.id());
-    tx.commit("remove commit");
+    tx.commit("remove commit").unwrap();
 
     // If we load the repo at head, we should not see the commit since it was
     // removed
     let loader = RepoLoader::init_from_file_system(
         &settings,
         test_repo.repo_path(),
-        &TestRepo::default_store_factories(),
+        &test_repo.env.default_store_factories(),
     )
     .unwrap();
-    let head_repo = loader.load_at_head(&settings).unwrap();
+    let head_repo = loader.load_at_head().unwrap();
     assert!(!head_repo.view().heads().contains(commit.id()));
 
     // If we load the repo at the previous operation, we should see the commit since
@@ -46,7 +46,7 @@ fn test_load_at_operation() {
     let loader = RepoLoader::init_from_file_system(
         &settings,
         test_repo.repo_path(),
-        &TestRepo::default_store_factories(),
+        &test_repo.env.default_store_factories(),
     )
     .unwrap();
     let old_repo = loader.load_at(repo.operation()).unwrap();

@@ -31,6 +31,10 @@ The following operators are supported.
 * `x.f()`: Method call.
 * `-x`: Negate integer value.
 * `!x`: Logical not.
+* `x >= y`, `x > y`, `x <= y`, `x < y`: Greater than or equal/greater than/
+  lesser than or equal/lesser than. Operands must be `Integer`s.
+* `x == y`, `x != y`: Equal/not equal. Operands must be either `Boolean`,
+  `Integer`, or `String`.
 * `x && y`: Logical and, short-circuiting.
 * `x || y`: Logical or, short-circuiting.
 * `x ++ y`: Concatenate `x` and `y` templates.
@@ -45,11 +49,21 @@ The following functions are defined.
   the given `width`.
 * `indent(prefix: Template, content: Template) -> Template`: Indent
   non-empty lines by the given `prefix`.
+* `pad_start(width: Integer, content: Template[, fill_char: Template])`: Pad (or
+  right-justify) content by adding leading fill characters. The `content`
+  shouldn't have newline character.
+* `pad_end(width: Integer, content: Template[, fill_char: Template])`: Pad (or
+  left-justify) content by adding trailing fill characters. The `content`
+  shouldn't have newline character.
+* `truncate_start(width: Integer, content: Template)`: Truncate `content` by
+  removing leading characters. The `content` shouldn't have newline character.
+* `truncate_end(width: Integer, content: Template)`: Truncate `content` by
+  removing trailing characters. The `content` shouldn't have newline character.
 * `label(label: Template, content: Template) -> Template`: Apply label to
   the content. The `label` is evaluated as a space-separated string.
 * `raw_escape_sequence(content: Template) -> Template`: Preserves any escape
   sequences in `content` (i.e., bypasses sanitization) and strips labels.
-  Note: This function is intended for escape sequences and as such, it's output
+  Note: This function is intended for escape sequences and as such, its output
   is expected to be invisible / of no display width. Outputting content with
   nonzero display width may break wrapping, indentation etc.
 * `if(condition: Boolean, then: Template[, else: Template]) -> Template`:
@@ -92,7 +106,7 @@ This type cannot be printed. The following methods are defined.
 * `remote_bookmarks() -> List<RefName>`: All remote bookmarks pointing to the commit.
 * `tags() -> List<RefName>`
 * `git_refs() -> List<RefName>`
-* `git_head() -> Option<RefName>`
+* `git_head() -> Boolean`: True for the Git `HEAD` commit.
 * `divergent() -> Boolean`: True if the commit's change id corresponds to multiple
   visible commits.
 * `hidden() -> Boolean`: True if the commit is not visible (a.k.a. abandoned).
@@ -114,6 +128,13 @@ The following methods are defined.
   ChangeId, whose canonical hex representation is "reversed" (z-k).
 * `.short([len: Integer]) -> String`
 * `.shortest([min_len: Integer]) -> ShortestIdPrefix`: Shortest unique prefix.
+
+### Email type
+
+The following methods are defined.
+
+* `.local() -> String`
+* `.domain() -> String`
 
 ### Integer type
 
@@ -198,8 +219,7 @@ The following methods are defined.
 The following methods are defined.
 
 * `.name() -> String`
-* `.email() -> String`
-* `.username() -> String`
+* `.email() -> Email`
 * `.timestamp() -> Timestamp`
 
 ### SizeHint type

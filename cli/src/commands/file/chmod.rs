@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use clap_complete::ArgValueCandidates;
+use clap_complete::ArgValueCompleter;
 use jj_lib::backend::TreeValue;
 use jj_lib::merged_tree::MergedTreeBuilder;
 use jj_lib::object_id::ObjectId;
@@ -22,6 +24,7 @@ use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
 use crate::command_error::user_error;
 use crate::command_error::CommandError;
+use crate::complete;
 use crate::ui::Ui;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
@@ -43,10 +46,20 @@ enum ChmodMode {
 pub(crate) struct FileChmodArgs {
     mode: ChmodMode,
     /// The revision to update
-    #[arg(long, short, default_value = "@")]
+    #[arg(
+        long, short,
+        default_value = "@",
+        value_name = "REVSET",
+        add = ArgValueCandidates::new(complete::mutable_revisions),
+    )]
     revision: RevisionArg,
     /// Paths to change the executable bit for
-    #[arg(required = true, value_hint = clap::ValueHint::AnyPath)]
+    #[arg(
+        required = true,
+        value_name = "FILESETS",
+        value_hint = clap::ValueHint::AnyPath,
+        add = ArgValueCompleter::new(complete::all_revision_files),
+    )]
     paths: Vec<String>,
 }
 
@@ -109,7 +122,7 @@ pub(crate) fn cmd_file_chmod(
 
     let new_tree_id = tree_builder.write_tree(store)?;
     tx.repo_mut()
-        .rewrite_commit(command.settings(), &commit)
+        .rewrite_commit(&commit)
         .set_tree_id(new_tree_id)
         .write()?;
     tx.finish(

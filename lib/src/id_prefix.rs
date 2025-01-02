@@ -32,21 +32,21 @@ use crate::object_id::PrefixResolution;
 use crate::repo::Repo;
 use crate::revset::DefaultSymbolResolver;
 use crate::revset::RevsetEvaluationError;
-use crate::revset::RevsetExpression;
 use crate::revset::RevsetExtensions;
 use crate::revset::RevsetResolutionError;
 use crate::revset::SymbolResolverExtension;
+use crate::revset::UserRevsetExpression;
 
 #[derive(Debug, Error)]
 pub enum IdPrefixIndexLoadError {
     #[error("Failed to resolve short-prefixes disambiguation revset")]
-    Resolution(#[source] RevsetResolutionError),
+    Resolution(#[from] RevsetResolutionError),
     #[error("Failed to evaluate short-prefixes disambiguation revset")]
-    Evaluation(#[source] RevsetEvaluationError),
+    Evaluation(#[from] RevsetEvaluationError),
 }
 
 struct DisambiguationData {
-    expression: Rc<RevsetExpression>,
+    expression: Rc<UserRevsetExpression>,
     indexes: OnceCell<Indexes>,
 }
 
@@ -64,16 +64,12 @@ impl DisambiguationData {
     ) -> Result<&Indexes, IdPrefixIndexLoadError> {
         self.indexes.get_or_try_init(|| {
             let symbol_resolver = DefaultSymbolResolver::new(repo, extensions);
-            let resolved_expression = self
+            let revset = self
                 .expression
-                .clone()
-                .resolve_user_expression(repo, &symbol_resolver)
-                .map_err(IdPrefixIndexLoadError::Resolution)?;
-            let revset = resolved_expression
-                .evaluate(repo)
-                .map_err(IdPrefixIndexLoadError::Evaluation)?;
+                .resolve_user_expression(repo, &symbol_resolver)?
+                .evaluate(repo)?;
 
-            let commit_change_ids = revset.commit_change_ids().collect_vec();
+            let commit_change_ids: Vec<_> = revset.commit_change_ids().try_collect()?;
             let mut commit_index = IdIndex::with_capacity(commit_change_ids.len());
             let mut change_index = IdIndex::with_capacity(commit_change_ids.len());
             for (i, (commit_id, change_id)) in commit_change_ids.iter().enumerate() {
@@ -127,7 +123,7 @@ impl IdPrefixContext {
         }
     }
 
-    pub fn disambiguate_within(mut self, expression: Rc<RevsetExpression>) -> Self {
+    pub fn disambiguate_within(mut self, expression: Rc<UserRevsetExpression>) -> Self {
         self.disambiguation = Some(DisambiguationData {
             expression,
             indexes: OnceCell::new(),

@@ -34,19 +34,17 @@ version_check = { workspace = true }
 
 [dependencies]
 async-trait = { workspace = true }
-backoff = { workspace = true }
 blake2 = { workspace = true }
 bstr = { workspace = true }
 chrono = { workspace = true }
 chrono-english = { workspace = true }
 clru = { workspace = true }
-config = { workspace = true }
 digest = { workspace = true }
+dunce = { workspace = true }
 either = { workspace = true }
 futures = { workspace = true }
 git2 = { workspace = true, optional = true }
 gix = { workspace = true, optional = true }
-gix-filter = { workspace = true, optional = true }
 glob = { workspace = true }
 hashbrown = { workspace = true }
 hex = { workspace = true }
@@ -65,6 +63,7 @@ rand_chacha = { workspace = true }
 rayon = { workspace = true }
 ref-cast = { workspace = true }
 regex = { workspace = true }
+same-file = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 smallvec = { workspace = true }
@@ -72,6 +71,7 @@ strsim = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, optional = true }
+toml_edit = { workspace = true }
 tracing = { workspace = true }
 watchman_client = { workspace = true, optional = true }
 whoami = { workspace = true }
@@ -86,18 +86,24 @@ winreg = { workspace = true }
 [dev-dependencies]
 assert_matches = { workspace = true }
 criterion = { workspace = true }
-esl01-renderdag = { workspace = true }
 indoc = { workspace = true }
 insta = { workspace = true }
 num_cpus = { workspace = true }
 pretty_assertions = { workspace = true }
+sapling-renderdag = { workspace = true }
 test-case = { workspace = true }
 testutils = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 
 [features]
 default = ["git"]
-git = ["dep:git2", "dep:gix", "dep:gix-filter"]
+git = ["dep:git2", "dep:gix"]
+gix-max-performance = [
+    # Requires `cmake` as a build dependency.
+    # Note that this feature is different from `gix/max-performance-safe`.
+    # See: https://docs.rs/gix/latest/gix/#performance
+    "gix/max-performance",
+]
 vendored-openssl = ["git2/vendored-openssl"]
 watchman = ["dep:tokio", "dep:watchman_client"]
 testing = ["git"]

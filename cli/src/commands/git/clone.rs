@@ -15,9 +15,9 @@
 use std::fs;
 use std::io;
 use std::io::Write;
+use std::mem;
 use std::num::NonZeroU32;
 use std::path::Path;
-use std::path::PathBuf;
 
 use jj_lib::git;
 use jj_lib::git::GitFetchError;
@@ -26,17 +26,16 @@ use jj_lib::repo::Repo;
 use jj_lib::str_util::StringPattern;
 use jj_lib::workspace::Workspace;
 
+use super::write_repository_level_trunk_alias;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::WorkspaceCommandHelper;
 use crate::command_error::cli_error;
 use crate::command_error::user_error;
 use crate::command_error::user_error_with_message;
 use crate::command_error::CommandError;
-use crate::commands::git::map_git_error;
 use crate::commands::git::maybe_add_gitignore;
-use crate::config::write_config_value_to_file;
-use crate::config::ConfigNamePathBuf;
 use crate::git_util::get_git_repo;
+use crate::git_util::map_git_error;
 use crate::git_util::print_git_import_stats;
 use crate::git_util::with_remote_git_callbacks;
 use crate::ui::Ui;
@@ -66,21 +65,20 @@ pub struct GitCloneArgs {
     depth: Option<NonZeroU32>,
 }
 
-fn absolute_git_source(cwd: &Path, source: &str) -> String {
+fn absolute_git_source(cwd: &Path, source: &str) -> Result<String, CommandError> {
     // Git appears to turn URL-like source to absolute path if local git directory
     // exits, and fails because '$PWD/https' is unsupported protocol. Since it would
-    // be tedious to copy the exact git (or libgit2) behavior, we simply assume a
-    // source containing ':' is a URL, SSH remote, or absolute path with Windows
-    // drive letter.
-    if !source.contains(':') && Path::new(source).exists() {
-        // It's less likely that cwd isn't utf-8, so just fall back to original source.
-        cwd.join(source)
-            .into_os_string()
-            .into_string()
-            .unwrap_or_else(|_| source.to_owned())
-    } else {
-        source.to_owned()
+    // be tedious to copy the exact git (or libgit2) behavior, we simply let gix
+    // parse the input as URL, rcp-like, or local path.
+    let mut url = gix::url::parse(source.as_ref()).map_err(cli_error)?;
+    url.canonicalize(cwd).map_err(user_error)?;
+    // As of gix 0.68.0, the canonicalized path uses platform-native directory
+    // separator, which isn't compatible with libgit2 on Windows.
+    if url.scheme == gix::url::Scheme::File {
+        url.path = gix::path::to_unix_separators_on_windows(mem::take(&mut url.path)).into_owned();
     }
+    // It's less likely that cwd isn't utf-8, so just fall back to original source.
+    Ok(String::from_utf8(url.to_bstring().into()).unwrap_or_else(|_| source.to_owned()))
 }
 
 fn clone_destination_for_source(source: &str) -> Option<&str> {
@@ -108,7 +106,7 @@ pub fn cmd_git_clone(
     if command.global_args().at_operation.is_some() {
         return Err(cli_error("--at-op is not respected"));
     }
-    let source = absolute_git_source(command.cwd(), &args.source);
+    let source = absolute_git_source(command.cwd(), &args.source)?;
     let wc_path_str = args
         .destination
         .as_deref()
@@ -129,8 +127,7 @@ pub fn cmd_git_clone(
 
     // Canonicalize because fs::remove_dir_all() doesn't seem to like e.g.
     // `/some/path/.`
-    let canonical_wc_path: PathBuf = wc_path
-        .canonicalize()
+    let canonical_wc_path = dunce::canonicalize(&wc_path)
         .map_err(|err| user_error_with_message(format!("Failed to create {wc_path_str}"), err))?;
     let clone_result = do_git_clone(
         ui,
@@ -165,16 +162,11 @@ pub fn cmd_git_clone(
 
     let (mut workspace_command, stats) = clone_result?;
     if let Some(default_branch) = &stats.default_branch {
-        // Set repository level `trunk()` alias to the default remote branch.
-        let config_path = workspace_command.repo_path().join("config.toml");
-        write_config_value_to_file(
-            &ConfigNamePathBuf::from_iter(["revset-aliases", "trunk()"]),
-            format!("{default_branch}@{remote_name}").into(),
-            &config_path,
-        )?;
-        writeln!(
-            ui.status(),
-            "Setting the revset alias \"trunk()\" to \"{default_branch}@{remote_name}\""
+        write_repository_level_trunk_alias(
+            ui,
+            workspace_command.repo_path(),
+            remote_name,
+            default_branch,
         )?;
 
         let default_branch_remote_ref = workspace_command
@@ -220,6 +212,7 @@ fn do_git_clone(
     maybe_add_gitignore(&workspace_command)?;
     git_repo.remote(remote_name, source).unwrap();
     let mut fetch_tx = workspace_command.start_transaction();
+    let git_settings = command.settings().git_settings()?;
 
     let stats = with_remote_git_callbacks(ui, None, |cb| {
         git::fetch(
@@ -228,7 +221,7 @@ fn do_git_clone(
             remote_name,
             &[StringPattern::everything()],
             cb,
-            &command.settings().git_settings(),
+            &git_settings,
             depth,
         )
     })
@@ -245,4 +238,59 @@ fn do_git_clone(
     print_git_import_stats(ui, fetch_tx.repo(), &stats.import_stats, true)?;
     fetch_tx.finish(ui, "fetch from git remote into empty repo")?;
     Ok((workspace_command, stats))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::MAIN_SEPARATOR;
+
+    use super::*;
+
+    #[test]
+    fn test_absolute_git_source() {
+        // gix::Url::canonicalize() works even if the path doesn't exist.
+        // However, we need to ensure that no symlinks exist at the test paths.
+        let temp_dir = testutils::new_temp_dir();
+        let cwd = dunce::canonicalize(temp_dir.path()).unwrap();
+        let cwd_slash = cwd.to_str().unwrap().replace(MAIN_SEPARATOR, "/");
+
+        // Local path
+        assert_eq!(
+            absolute_git_source(&cwd, "foo").unwrap(),
+            format!("{cwd_slash}/foo")
+        );
+        assert_eq!(
+            absolute_git_source(&cwd, r"foo\bar").unwrap(),
+            if cfg!(windows) {
+                format!("{cwd_slash}/foo/bar")
+            } else {
+                format!(r"{cwd_slash}/foo\bar")
+            }
+        );
+        assert_eq!(
+            absolute_git_source(&cwd.join("bar"), &format!("{cwd_slash}/foo")).unwrap(),
+            format!("{cwd_slash}/foo")
+        );
+
+        // rcp-like
+        assert_eq!(
+            absolute_git_source(&cwd, "git@example.org:foo/bar.git").unwrap(),
+            "git@example.org:foo/bar.git"
+        );
+        // URL
+        assert_eq!(
+            absolute_git_source(&cwd, "https://example.org/foo.git").unwrap(),
+            "https://example.org/foo.git"
+        );
+        // Custom scheme isn't an error
+        assert_eq!(
+            absolute_git_source(&cwd, "custom://example.org/foo.git").unwrap(),
+            "custom://example.org/foo.git"
+        );
+        // Password shouldn't be redacted (gix::Url::to_string() would do)
+        assert_eq!(
+            absolute_git_source(&cwd, "https://user:pass@example.org/").unwrap(),
+            "https://user:pass@example.org/"
+        );
+    }
 }

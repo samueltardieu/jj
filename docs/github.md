@@ -48,7 +48,7 @@ $ jj commit -m 'feat(bar): add support for bar'
 # on the working-copy commit's *parent* because the working copy itself is empty.
 $ jj bookmark create bar -r @- # `bar` now contains the previous two commits.
 # Push the bookmark to GitHub (pushes only `bar`)
-$ jj git push
+$ jj git push --allow-new
 ```
 
 While it's possible to create a bookmark in advance and commit on top of it in a
@@ -62,13 +62,15 @@ As of October 2023, Jujutsu has no equivalent to a `git pull` command (see
 `jj git fetch` followed by a `jj rebase -d $main_bookmark` to update your
 changes.
 
-[sync-issue]: https://github.com/martinvonz/jj/issues/1039
+[sync-issue]: https://github.com/jj-vcs/jj/issues/1039
 
 ## Working in a Git co-located repository
 
 After doing `jj git init --colocate`, Git will be in a [detached HEAD
-state][detached], which is unusual, as Git mainly works with bookmarks. In a
-co-located repository, every `jj` command will automatically synchronize
+state][detached], which is unusual, as Git mainly works with named branches; jj
+does not.
+
+In a co-located repository, every `jj` command will automatically synchronize
 Jujutsu's view of the repo with Git's view. For example, `jj commit` updates the
 HEAD of the Git repository, enabling an incremental migration.
 
@@ -78,7 +80,7 @@ $ # Do some more work.
 $ jj commit -m "Update tutorial"
 # Create a bookmark on the working-copy commit's parent
 $ jj bookmark create doc-update -r @-
-$ jj git push
+$ jj git push --allow-new
 ```
 
 ## Working in a Jujutsu repository
@@ -116,7 +118,7 @@ $ jj diff
 $ # Give the fix a description and create a new working-copy on top.
 $ jj commit -m 'address pr comments'
 $ # Update the bookmark to point to the new commit.
-$ jj bookmark set your-feature -r @-
+$ jj bookmark move your-feature --to @-
 $ # Push it to your remote
 $ jj git push
 ```
@@ -136,7 +138,7 @@ $ jj diff
 $ # Give the fix a description.
 $ jj describe -m 'address pr comments'
 $ # Update the bookmark to point to the current commit.
-$ jj bookmark set your-feature -r @
+$ jj bookmark move your-feature --to @
 $ # Push it to your remote
 $ jj git push
 ```
@@ -160,7 +162,7 @@ $ jj git push --bookmark your-feature
 ```
 
 The hyphen after `your-feature` comes from the
-[revset](https://github.com/martinvonz/jj/blob/main/docs/revsets.md) syntax.
+[revset](https://github.com/jj-vcs/jj/blob/main/docs/revsets.md) syntax.
 
 ## Working with other people's bookmarks
 
@@ -198,7 +200,7 @@ and run `direnv allow` to approve it for direnv to run. Then GitHub CLI will
 work automatically even in repos that aren't co-located so you can execute
 commands like `gh issue list` normally.
 
-[issue #1008]: https://github.com/martinvonz/jj/issues/1008
+[issue #1008]: https://github.com/jj-vcs/jj/issues/1008
 
 ## Useful Revsets
 
@@ -222,10 +224,10 @@ Log all remote bookmarks that you authored or committed to:
 $ jj log -r 'remote_bookmarks() & (mine() | committer(your@email.com))'
 ```
 
-Log all descendants of the current working copy that aren't on any remote:
+Log all ancestors of the current working copy that aren't on any remote:
 
 ```shell
-$ jj log -r '::@ & ~remote_bookmarks()'
+$ jj log -r 'remote_bookmarks()..@'
 ```
 
 ## Merge conflicts
@@ -244,7 +246,7 @@ the [tutorial][tut].
 [auto-bookmark]: config.md#automatic-local-bookmark-creation
 [detached]: https://git-scm.com/docs/git-checkout#_detached_head
 [gh]: https://docs.github.com/en/authentication/connecting-to-github-with-ssh/generating-a-new-ssh-key-and-adding-it-to-the-ssh-agent
-[http-auth]: https://github.com/martinvonz/jj/issues/469
+[http-auth]: https://github.com/jj-vcs/jj/issues/469
 [tut]: tutorial.md#conflicts
 [stacked]: https://jg.gg/2018/09/29/stacked-diffs-versus-pull-requests/
 

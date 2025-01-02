@@ -32,8 +32,11 @@ use jj_lib::backend::CommitId;
 use jj_lib::backend::CopyRecord;
 use jj_lib::backend::TreeValue;
 use jj_lib::commit::Commit;
-use jj_lib::conflicts::materialize_merge_result;
+use jj_lib::config::ConfigGetError;
+use jj_lib::config::ConfigGetResultExt as _;
+use jj_lib::conflicts::materialize_merge_result_to_bytes;
 use jj_lib::conflicts::materialized_diff_stream;
+use jj_lib::conflicts::ConflictMarkerStyle;
 use jj_lib::conflicts::MaterializedTreeDiffEntry;
 use jj_lib::conflicts::MaterializedTreeValue;
 use jj_lib::copies::CopiesTreeDiffEntry;
@@ -55,10 +58,10 @@ use jj_lib::merge::MergedTreeValue;
 use jj_lib::merged_tree::MergedTree;
 use jj_lib::object_id::ObjectId;
 use jj_lib::repo::Repo;
+use jj_lib::repo_path::InvalidRepoPathError;
 use jj_lib::repo_path::RepoPath;
 use jj_lib::repo_path::RepoPathUiConverter;
 use jj_lib::rewrite::rebase_to_dest_parent;
-use jj_lib::settings::ConfigResultExt as _;
 use jj_lib::settings::UserSettings;
 use jj_lib::store::Store;
 use pollster::FutureExt;
@@ -103,7 +106,7 @@ pub struct DiffFormatArgs {
     /// For each path, show only its path
     ///
     /// Typically useful for shell commands like:
-    ///    `jj diff -r @- --name_only | xargs perl -pi -e's/OLD/NEW/g`
+    ///    `jj diff -r @- --name-only | xargs perl -pi -e's/OLD/NEW/g`
     #[arg(long)]
     pub name_only: bool,
     /// Show a Git-format diff
@@ -144,7 +147,7 @@ pub enum DiffFormat {
 pub fn diff_formats_for(
     settings: &UserSettings,
     args: &DiffFormatArgs,
-) -> Result<Vec<DiffFormat>, config::ConfigError> {
+) -> Result<Vec<DiffFormat>, ConfigGetError> {
     let formats = diff_formats_from_args(settings, args)?;
     if formats.is_empty() {
         Ok(vec![default_diff_format(settings, args)?])
@@ -159,7 +162,7 @@ pub fn diff_formats_for_log(
     settings: &UserSettings,
     args: &DiffFormatArgs,
     patch: bool,
-) -> Result<Vec<DiffFormat>, config::ConfigError> {
+) -> Result<Vec<DiffFormat>, ConfigGetError> {
     let mut formats = diff_formats_from_args(settings, args)?;
     // --patch implies default if no format other than --summary is specified
     if patch && matches!(formats.as_slice(), [] | [DiffFormat::Summary]) {
@@ -172,7 +175,7 @@ pub fn diff_formats_for_log(
 fn diff_formats_from_args(
     settings: &UserSettings,
     args: &DiffFormatArgs,
-) -> Result<Vec<DiffFormat>, config::ConfigError> {
+) -> Result<Vec<DiffFormat>, ConfigGetError> {
     let mut formats = Vec::new();
     if args.summary {
         formats.push(DiffFormat::Summary);
@@ -184,7 +187,7 @@ fn diff_formats_from_args(
         formats.push(DiffFormat::NameOnly);
     }
     if args.git {
-        let options = UnifiedDiffOptions::from_args(args);
+        let options = UnifiedDiffOptions::from_settings_and_args(settings, args)?;
         formats.push(DiffFormat::Git(Box::new(options)));
     }
     if args.color_words {
@@ -206,9 +209,8 @@ fn diff_formats_from_args(
 fn default_diff_format(
     settings: &UserSettings,
     args: &DiffFormatArgs,
-) -> Result<DiffFormat, config::ConfigError> {
-    let config = settings.config();
-    if let Some(args) = config.get("ui.diff.tool").optional()? {
+) -> Result<DiffFormat, ConfigGetError> {
+    if let Some(args) = settings.get("ui.diff.tool").optional()? {
         // External "tool" overrides the internal "format" option.
         let tool = if let CommandNameAndArgs::String(name) = &args {
             merge_tools::get_external_tool_config(settings, name)?
@@ -218,9 +220,9 @@ fn default_diff_format(
         .unwrap_or_else(|| ExternalMergeTool::with_diff_args(&args));
         return Ok(DiffFormat::Tool(Box::new(tool)));
     }
-    let name = if let Some(name) = config.get_string("ui.diff.format").optional()? {
+    let name = if let Some(name) = settings.get_string("ui.diff.format").optional()? {
         name
-    } else if let Some(name) = config.get_string("diff.format").optional()? {
+    } else if let Some(name) = settings.get_string("diff.format").optional()? {
         name // old config name
     } else {
         "color-words".to_owned()
@@ -230,7 +232,7 @@ fn default_diff_format(
         "types" => Ok(DiffFormat::Types),
         "name-only" => Ok(DiffFormat::NameOnly),
         "git" => {
-            let options = UnifiedDiffOptions::from_args(args);
+            let options = UnifiedDiffOptions::from_settings_and_args(settings, args)?;
             Ok(DiffFormat::Git(Box::new(options)))
         }
         "color-words" => {
@@ -241,9 +243,11 @@ fn default_diff_format(
             let options = DiffStatOptions::from_args(args);
             Ok(DiffFormat::Stat(Box::new(options)))
         }
-        _ => Err(config::ConfigError::Message(format!(
-            "invalid diff format: {name}"
-        ))),
+        _ => Err(ConfigGetError::Type {
+            name: "ui.diff.format".to_owned(),
+            error: format!("Invalid diff format: {name}").into(),
+            source_path: None,
+        }),
     }
 }
 
@@ -253,11 +257,13 @@ pub enum DiffRenderError {
     DiffGenerate(#[source] DiffGenerateError),
     #[error(transparent)]
     Backend(#[from] BackendError),
-    #[error("Access denied to {path}: {source}")]
+    #[error("Access denied to {path}")]
     AccessDenied {
         path: String,
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    #[error(transparent)]
+    InvalidRepoPath(#[from] InvalidRepoPathError),
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -266,6 +272,7 @@ pub enum DiffRenderError {
 pub struct DiffRenderer<'a> {
     repo: &'a dyn Repo,
     path_converter: &'a RepoPathUiConverter,
+    conflict_marker_style: ConflictMarkerStyle,
     formats: Vec<DiffFormat>,
 }
 
@@ -273,12 +280,14 @@ impl<'a> DiffRenderer<'a> {
     pub fn new(
         repo: &'a dyn Repo,
         path_converter: &'a RepoPathUiConverter,
+        conflict_marker_style: ConflictMarkerStyle,
         formats: Vec<DiffFormat>,
     ) -> Self {
         DiffRenderer {
             repo,
-            formats,
             path_converter,
+            conflict_marker_style,
+            formats,
         }
     }
 
@@ -330,7 +339,15 @@ impl<'a> DiffRenderer<'a> {
                 DiffFormat::Stat(options) => {
                     let tree_diff =
                         from_tree.diff_stream_with_copies(to_tree, matcher, copy_records);
-                    show_diff_stat(formatter, store, tree_diff, path_converter, options, width)?;
+                    show_diff_stat(
+                        formatter,
+                        store,
+                        tree_diff,
+                        path_converter,
+                        options,
+                        width,
+                        self.conflict_marker_style,
+                    )?;
                 }
                 DiffFormat::Types => {
                     let tree_diff =
@@ -345,12 +362,25 @@ impl<'a> DiffRenderer<'a> {
                 DiffFormat::Git(options) => {
                     let tree_diff =
                         from_tree.diff_stream_with_copies(to_tree, matcher, copy_records);
-                    show_git_diff(formatter, store, tree_diff, options)?;
+                    show_git_diff(
+                        formatter,
+                        store,
+                        tree_diff,
+                        options,
+                        self.conflict_marker_style,
+                    )?;
                 }
                 DiffFormat::ColorWords(options) => {
                     let tree_diff =
                         from_tree.diff_stream_with_copies(to_tree, matcher, copy_records);
-                    show_color_words_diff(formatter, store, tree_diff, path_converter, options)?;
+                    show_color_words_diff(
+                        formatter,
+                        store,
+                        tree_diff,
+                        path_converter,
+                        options,
+                        self.conflict_marker_style,
+                    )?;
                 }
                 DiffFormat::Tool(tool) => {
                     match tool.diff_invocation_mode {
@@ -364,12 +394,21 @@ impl<'a> DiffRenderer<'a> {
                                 tree_diff,
                                 path_converter,
                                 tool,
+                                self.conflict_marker_style,
                             )
                         }
                         DiffToolMode::Dir => {
                             let mut writer = formatter.raw()?;
-                            generate_diff(ui, writer.as_mut(), from_tree, to_tree, matcher, tool)
-                                .map_err(DiffRenderError::DiffGenerate)
+                            generate_diff(
+                                ui,
+                                writer.as_mut(),
+                                from_tree,
+                                to_tree,
+                                matcher,
+                                tool,
+                                self.conflict_marker_style,
+                            )
+                            .map_err(DiffRenderError::DiffGenerate)
                         }
                     }?;
                 }
@@ -509,19 +548,23 @@ impl ColorWordsDiffOptions {
     fn from_settings_and_args(
         settings: &UserSettings,
         args: &DiffFormatArgs,
-    ) -> Result<Self, config::ConfigError> {
-        let config = settings.config();
+    ) -> Result<Self, ConfigGetError> {
         let max_inline_alternation = {
-            let key = "diff.color-words.max-inline-alternation";
-            match config.get_int(key)? {
+            let name = "diff.color-words.max-inline-alternation";
+            match settings.get_int(name)? {
                 -1 => None, // unlimited
-                n => Some(usize::try_from(n).map_err(|err| {
-                    config::ConfigError::Message(format!("invalid {key}: {err}"))
+                n => Some(usize::try_from(n).map_err(|err| ConfigGetError::Type {
+                    name: name.to_owned(),
+                    error: err.into(),
+                    source_path: None,
                 })?),
             }
         };
+        let context = args
+            .context
+            .map_or_else(|| settings.get("diff.color-words.context"), Ok)?;
         Ok(ColorWordsDiffOptions {
-            context: args.context.unwrap_or(DEFAULT_CONTEXT_LINES),
+            context,
             line_diff: LineDiffOptions::from_args(args),
             max_inline_alternation,
         })
@@ -833,7 +876,11 @@ fn file_content_for_diff(reader: &mut dyn io::Read) -> io::Result<FileContent> {
     })
 }
 
-fn diff_content(path: &RepoPath, value: MaterializedTreeValue) -> io::Result<FileContent> {
+fn diff_content(
+    path: &RepoPath,
+    value: MaterializedTreeValue,
+    conflict_marker_style: ConflictMarkerStyle,
+) -> io::Result<FileContent> {
     match value {
         MaterializedTreeValue::Absent => Ok(FileContent::empty()),
         MaterializedTreeValue::AccessDenied(err) => Ok(FileContent {
@@ -857,15 +904,10 @@ fn diff_content(path: &RepoPath, value: MaterializedTreeValue) -> io::Result<Fil
             id: _,
             contents,
             executable: _,
-        } => {
-            let mut data = vec![];
-            materialize_merge_result(&contents, &mut data)
-                .expect("Failed to materialize conflict to in-memory buffer");
-            Ok(FileContent {
-                is_binary: false,
-                contents: data,
-            })
-        }
+        } => Ok(FileContent {
+            is_binary: false,
+            contents: materialize_merge_result_to_bytes(&contents, conflict_marker_style).into(),
+        }),
         MaterializedTreeValue::OtherConflict { id } => Ok(FileContent {
             is_binary: false,
             contents: id.describe().into_bytes(),
@@ -903,6 +945,7 @@ pub fn show_color_words_diff(
     tree_diff: BoxStream<CopiesTreeDiffEntry>,
     path_converter: &RepoPathUiConverter,
     options: &ColorWordsDiffOptions,
+    conflict_marker_style: ConflictMarkerStyle,
 ) -> Result<(), DiffRenderError> {
     let mut diff_stream = materialized_diff_stream(store, tree_diff);
     async {
@@ -938,7 +981,7 @@ pub fn show_color_words_diff(
                     formatter.labeled("header"),
                     "Added {description} {right_ui_path}:"
                 )?;
-                let right_content = diff_content(right_path, right_value)?;
+                let right_content = diff_content(right_path, right_value, conflict_marker_style)?;
                 if right_content.is_empty() {
                     writeln!(formatter.labeled("empty"), "    (empty)")?;
                 } else if right_content.is_binary {
@@ -1000,8 +1043,8 @@ pub fn show_color_words_diff(
                         )
                     }
                 };
-                let left_content = diff_content(left_path, left_value)?;
-                let right_content = diff_content(right_path, right_value)?;
+                let left_content = diff_content(left_path, left_value, conflict_marker_style)?;
+                let right_content = diff_content(right_path, right_value, conflict_marker_style)?;
                 if left_path == right_path {
                     writeln!(
                         formatter.labeled("header"),
@@ -1029,7 +1072,7 @@ pub fn show_color_words_diff(
                     formatter.labeled("header"),
                     "Removed {description} {right_ui_path}:"
                 )?;
-                let left_content = diff_content(left_path, left_value)?;
+                let left_content = diff_content(left_path, left_value, conflict_marker_style)?;
                 if left_content.is_empty() {
                     writeln!(formatter.labeled("empty"), "    (empty)")?;
                 } else if left_content.is_binary {
@@ -1051,18 +1094,18 @@ pub fn show_file_by_file_diff(
     tree_diff: BoxStream<CopiesTreeDiffEntry>,
     path_converter: &RepoPathUiConverter,
     tool: &ExternalMergeTool,
+    conflict_marker_style: ConflictMarkerStyle,
 ) -> Result<(), DiffRenderError> {
-    fn create_file(
-        path: &RepoPath,
-        wc_dir: &Path,
-        value: MaterializedTreeValue,
-    ) -> Result<PathBuf, DiffRenderError> {
-        let fs_path = path.to_fs_path(wc_dir);
+    let create_file = |path: &RepoPath,
+                       wc_dir: &Path,
+                       value: MaterializedTreeValue|
+     -> Result<PathBuf, DiffRenderError> {
+        let fs_path = path.to_fs_path(wc_dir)?;
         std::fs::create_dir_all(fs_path.parent().unwrap())?;
-        let content = diff_content(path, value)?;
+        let content = diff_content(path, value, conflict_marker_style)?;
         std::fs::write(&fs_path, content.contents)?;
         Ok(fs_path)
-    }
+    };
 
     let temp_dir = new_utf8_temp_dir("jj-diff-")?;
     let left_wc_dir = temp_dir.path().join("left");
@@ -1125,6 +1168,7 @@ struct GitDiffPart {
 fn git_diff_part(
     path: &RepoPath,
     value: MaterializedTreeValue,
+    conflict_marker_style: ConflictMarkerStyle,
 ) -> Result<GitDiffPart, DiffRenderError> {
     const DUMMY_HASH: &str = "0000000000";
     let mode;
@@ -1175,12 +1219,10 @@ fn git_diff_part(
         } => {
             mode = if executable { "100755" } else { "100644" };
             hash = DUMMY_HASH.to_owned();
-            let mut data = vec![];
-            materialize_merge_result(&contents, &mut data)
-                .expect("Failed to materialize conflict to in-memory buffer");
             content = FileContent {
                 is_binary: false, // TODO: are we sure this is never binary?
-                contents: data,
+                contents: materialize_merge_result_to_bytes(&contents, conflict_marker_style)
+                    .into(),
             };
         }
         MaterializedTreeValue::OtherConflict { id } => {
@@ -1212,11 +1254,17 @@ pub struct UnifiedDiffOptions {
 }
 
 impl UnifiedDiffOptions {
-    fn from_args(args: &DiffFormatArgs) -> Self {
-        UnifiedDiffOptions {
-            context: args.context.unwrap_or(DEFAULT_CONTEXT_LINES),
+    fn from_settings_and_args(
+        settings: &UserSettings,
+        args: &DiffFormatArgs,
+    ) -> Result<Self, ConfigGetError> {
+        let context = args
+            .context
+            .map_or_else(|| settings.get("diff.git.context"), Ok)?;
+        Ok(UnifiedDiffOptions {
+            context,
             line_diff: LineDiffOptions::from_args(args),
-        }
+        })
     }
 }
 
@@ -1274,8 +1322,8 @@ fn unified_diff_hunks<'content>(
 ) -> Vec<UnifiedDiffHunk<'content>> {
     let mut hunks = vec![];
     let mut current_hunk = UnifiedDiffHunk {
-        left_line_range: 1..1,
-        right_line_range: 1..1,
+        left_line_range: 0..0,
+        right_line_range: 0..0,
         lines: vec![],
     };
     let diff = diff_by_line([left_content, right_content], &options.line_diff);
@@ -1390,13 +1438,28 @@ fn show_unified_diff_hunks(
     right_content: &[u8],
     options: &UnifiedDiffOptions,
 ) -> io::Result<()> {
+    // "If the chunk size is 0, the first number is one lower than one would
+    // expect." - https://www.artima.com/weblogs/viewpost.jsp?thread=164293
+    //
+    // The POSIX spec also states that "the ending line number of an empty range
+    // shall be the number of the preceding line, or 0 if the range is at the
+    // start of the file."
+    // - https://pubs.opengroup.org/onlinepubs/9799919799/utilities/diff.html
+    fn to_line_number(range: Range<usize>) -> usize {
+        if range.is_empty() {
+            range.start
+        } else {
+            range.start + 1
+        }
+    }
+
     for hunk in unified_diff_hunks(left_content, right_content, options) {
         writeln!(
             formatter.labeled("hunk_header"),
             "@@ -{},{} +{},{} @@",
-            hunk.left_line_range.start,
+            to_line_number(hunk.left_line_range.clone()),
             hunk.left_line_range.len(),
-            hunk.right_line_range.start,
+            to_line_number(hunk.right_line_range.clone()),
             hunk.right_line_range.len()
         )?;
         for (line_type, tokens) in &hunk.lines {
@@ -1438,6 +1501,7 @@ pub fn show_git_diff(
     store: &Store,
     tree_diff: BoxStream<CopiesTreeDiffEntry>,
     options: &UnifiedDiffOptions,
+    conflict_marker_style: ConflictMarkerStyle,
 ) -> Result<(), DiffRenderError> {
     let mut diff_stream = materialized_diff_stream(store, tree_diff);
     async {
@@ -1448,8 +1512,8 @@ pub fn show_git_diff(
             let right_path_string = right_path.as_internal_file_string();
             let (left_value, right_value) = values?;
 
-            let left_part = git_diff_part(left_path, left_value)?;
-            let right_part = git_diff_part(right_path, right_value)?;
+            let left_part = git_diff_part(left_path, left_value, conflict_marker_style)?;
+            let right_part = git_diff_part(right_path, right_value, conflict_marker_style)?;
 
             formatter.with_label("file_header", |formatter| {
                 writeln!(
@@ -1623,6 +1687,7 @@ pub fn show_diff_stat(
     path_converter: &RepoPathUiConverter,
     options: &DiffStatOptions,
     display_width: usize,
+    conflict_marker_style: ConflictMarkerStyle,
 ) -> Result<(), DiffRenderError> {
     let mut stats: Vec<DiffStat> = vec![];
     let mut unresolved_renames = HashSet::new();
@@ -1635,8 +1700,8 @@ pub fn show_diff_stat(
             let (left, right) = values?;
             let left_path = path.source();
             let right_path = path.target();
-            let left_content = diff_content(left_path, left)?;
-            let right_content = diff_content(right_path, right)?;
+            let left_content = diff_content(left_path, left, conflict_marker_style)?;
+            let right_content = diff_content(right_path, right, conflict_marker_style)?;
 
             let left_ui_path = path_converter.format_file_path(left_path);
             let path = if left_path == right_path {

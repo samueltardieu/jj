@@ -22,7 +22,11 @@ pub mod push;
 pub mod remote;
 pub mod submodule;
 
+use std::path::Path;
+
 use clap::Subcommand;
+use jj_lib::config::ConfigFile;
+use jj_lib::config::ConfigSource;
 
 use self::clone::cmd_git_clone;
 use self::clone::GitCloneArgs;
@@ -44,8 +48,6 @@ use self::submodule::cmd_git_submodule;
 use self::submodule::GitSubmoduleCommand;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::WorkspaceCommandHelper;
-use crate::command_error::user_error;
-use crate::command_error::user_error_with_hint;
 use crate::command_error::user_error_with_message;
 use crate::command_error::CommandError;
 use crate::ui::Ui;
@@ -53,7 +55,7 @@ use crate::ui::Ui;
 /// Commands for working with Git remotes and the underlying Git repo
 ///
 /// For a comparison with Git, including a table of commands, see
-/// https://martinvonz.github.io/jj/latest/git-comparison/.
+/// https://jj-vcs.github.io/jj/latest/git-comparison/.
 #[derive(Subcommand, Clone, Debug)]
 pub enum GitCommand {
     Clone(GitCloneArgs),
@@ -87,24 +89,6 @@ pub fn cmd_git(
     }
 }
 
-fn map_git_error(err: git2::Error) -> CommandError {
-    if err.class() == git2::ErrorClass::Ssh {
-        let hint =
-            if err.code() == git2::ErrorCode::Certificate && std::env::var_os("HOME").is_none() {
-                "The HOME environment variable is not set, and might be required for Git to \
-                 successfully load certificates. Try setting it to the path of a directory that \
-                 contains a `.ssh` directory."
-            } else {
-                "Jujutsu uses libssh2, which doesn't respect ~/.ssh/config. Does `ssh -F \
-                 /dev/null` to the host work?"
-            };
-
-        user_error_with_hint(err, hint)
-    } else {
-        user_error(err.to_string())
-    }
-}
-
 pub fn maybe_add_gitignore(workspace_command: &WorkspaceCommandHelper) -> Result<(), CommandError> {
     if workspace_command.working_copy_shared_with_git() {
         std::fs::write(
@@ -126,4 +110,22 @@ fn get_single_remote(git_repo: &git2::Repository) -> Result<Option<String>, Comm
         1 => git_remotes.get(0).map(ToOwned::to_owned),
         _ => None,
     })
+}
+
+/// Sets repository level `trunk()` alias to the specified remote branch.
+fn write_repository_level_trunk_alias(
+    ui: &Ui,
+    repo_path: &Path,
+    remote: &str,
+    branch: &str,
+) -> Result<(), CommandError> {
+    let mut file = ConfigFile::load_or_empty(ConfigSource::Repo, repo_path.join("config.toml"))?;
+    file.set_value(["revset-aliases", "trunk()"], format!("{branch}@{remote}"))
+        .expect("initial repo config shouldn't have invalid values");
+    file.save()?;
+    writeln!(
+        ui.status(),
+        r#"Setting the revset alias "trunk()" to "{branch}@{remote}""#,
+    )?;
+    Ok(())
 }

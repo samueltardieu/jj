@@ -13,11 +13,15 @@
 // limitations under the License.
 
 use futures::StreamExt as _;
+use indoc::indoc;
 use itertools::Itertools;
 use jj_lib::backend::ChangeId;
 use jj_lib::backend::MillisSinceEpoch;
 use jj_lib::backend::Signature;
 use jj_lib::backend::Timestamp;
+use jj_lib::config::ConfigLayer;
+use jj_lib::config::ConfigSource;
+use jj_lib::config::StackedConfig;
 use jj_lib::matchers::EverythingMatcher;
 use jj_lib::merged_tree::MergedTree;
 use jj_lib::repo::Repo;
@@ -31,6 +35,16 @@ use testutils::create_tree;
 use testutils::CommitGraphBuilder;
 use testutils::TestRepo;
 use testutils::TestRepoBackend;
+
+fn config_with_commit_timestamp(timestamp: &str) -> StackedConfig {
+    let mut config = testutils::base_user_config();
+    let mut layer = ConfigLayer::empty(ConfigSource::User);
+    layer
+        .set_value("debug.commit-timestamp", timestamp)
+        .unwrap();
+    config.add_layer(layer);
+    config
+}
 
 fn diff_paths(from_tree: &MergedTree, to_tree: &MergedTree) -> Vec<RepoPathBuf> {
     from_tree
@@ -50,7 +64,6 @@ fn to_owned_path_vec(paths: &[&RepoPath]) -> Vec<RepoPathBuf> {
 #[test_case(TestRepoBackend::Local ; "local backend")]
 #[test_case(TestRepoBackend::Git ; "git backend")]
 fn test_initial(backend: TestRepoBackend) {
-    let settings = testutils::user_settings();
     let test_repo = TestRepo::init_with_backend(backend);
     let repo = &test_repo.repo;
     let store = repo.store();
@@ -65,7 +78,7 @@ fn test_initial(backend: TestRepoBackend) {
         ],
     );
 
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     let author_signature = Signature {
         name: "author name".to_string(),
         email: "author email".to_string(),
@@ -85,7 +98,7 @@ fn test_initial(backend: TestRepoBackend) {
     let change_id = ChangeId::new(vec![100u8; 16]);
     let builder = tx
         .repo_mut()
-        .new_commit(&settings, vec![store.root_commit_id().clone()], tree.id())
+        .new_commit(vec![store.root_commit_id().clone()], tree.id())
         .set_change_id(change_id.clone())
         .set_description("description")
         .set_author(author_signature.clone())
@@ -97,7 +110,7 @@ fn test_initial(backend: TestRepoBackend) {
     assert_eq!(builder.author(), &author_signature);
     assert_eq!(builder.committer(), &committer_signature);
     let commit = builder.write().unwrap();
-    tx.commit("test");
+    tx.commit("test").unwrap();
 
     let parents: Vec<_> = commit.parents().try_collect().unwrap();
     assert_eq!(parents, vec![store.root_commit()]);
@@ -118,9 +131,10 @@ fn test_initial(backend: TestRepoBackend) {
 #[test_case(TestRepoBackend::Git ; "git backend")]
 fn test_rewrite(backend: TestRepoBackend) {
     let settings = testutils::user_settings();
-    let test_repo = TestRepo::init_with_backend(backend);
+    let test_repo = TestRepo::init_with_backend_and_settings(backend, &settings);
+    let test_env = &test_repo.env;
     let repo = &test_repo.repo;
-    let store = repo.store().clone();
+    let store = repo.store();
 
     let root_file_path = RepoPath::from_internal_string("file");
     let dir_file_path = RepoPath::from_internal_string("dir/file");
@@ -132,17 +146,13 @@ fn test_rewrite(backend: TestRepoBackend) {
         ],
     );
 
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     let initial_commit = tx
         .repo_mut()
-        .new_commit(
-            &settings,
-            vec![store.root_commit_id().clone()],
-            initial_tree.id(),
-        )
+        .new_commit(vec![store.root_commit_id().clone()], initial_tree.id())
         .write()
         .unwrap();
-    let repo = tx.commit("test");
+    let repo = tx.commit("test").unwrap();
 
     let rewritten_tree = create_tree(
         &repo,
@@ -152,23 +162,30 @@ fn test_rewrite(backend: TestRepoBackend) {
         ],
     );
 
-    let config = config::Config::builder()
-        .set_override("user.name", "Rewrite User")
-        .unwrap()
-        .set_override("user.email", "rewrite.user@example.com")
-        .unwrap()
-        .build()
-        .unwrap();
-    let rewrite_settings = UserSettings::from_config(config);
-    let mut tx = repo.start_transaction(&settings);
+    let mut config = StackedConfig::with_defaults();
+    config.add_layer(
+        ConfigLayer::parse(
+            ConfigSource::User,
+            indoc! {"
+                user.name = 'Rewrite User'
+                user.email = 'rewrite.user@example.com'
+            "},
+        )
+        .unwrap(),
+    );
+    let rewrite_settings = UserSettings::from_config(config).unwrap();
+    let repo = test_env.load_repo_at_head(&rewrite_settings, test_repo.repo_path());
+    let store = repo.store();
+    let initial_commit = store.get_commit(initial_commit.id()).unwrap();
+    let mut tx = repo.start_transaction();
     let rewritten_commit = tx
         .repo_mut()
-        .rewrite_commit(&rewrite_settings, &initial_commit)
+        .rewrite_commit(&initial_commit)
         .set_tree_id(rewritten_tree.id().clone())
         .write()
         .unwrap();
-    tx.repo_mut().rebase_descendants(&settings).unwrap();
-    tx.commit("test");
+    tx.repo_mut().rebase_descendants().unwrap();
+    tx.commit("test").unwrap();
     let parents: Vec<_> = rewritten_commit.parents().try_collect().unwrap();
     assert_eq!(parents, vec![store.root_commit()]);
     let predecessors: Vec<_> = rewritten_commit.predecessors().try_collect().unwrap();
@@ -203,16 +220,15 @@ fn test_rewrite(backend: TestRepoBackend) {
 #[test_case(TestRepoBackend::Local ; "local backend")]
 #[test_case(TestRepoBackend::Git ; "git backend")]
 fn test_rewrite_update_missing_user(backend: TestRepoBackend) {
-    let missing_user_settings =
-        UserSettings::from_config(config::Config::builder().build().unwrap());
-    let test_repo = TestRepo::init_with_backend(backend);
+    let missing_user_settings = UserSettings::from_config(StackedConfig::with_defaults()).unwrap();
+    let test_repo = TestRepo::init_with_backend_and_settings(backend, &missing_user_settings);
+    let test_env = &test_repo.env;
     let repo = &test_repo.repo;
 
-    let mut tx = repo.start_transaction(&missing_user_settings);
+    let mut tx = repo.start_transaction();
     let initial_commit = tx
         .repo_mut()
         .new_commit(
-            &missing_user_settings,
             vec![repo.store().root_commit_id().clone()],
             repo.store().empty_merged_tree_id(),
         )
@@ -222,18 +238,26 @@ fn test_rewrite_update_missing_user(backend: TestRepoBackend) {
     assert_eq!(initial_commit.author().email, "");
     assert_eq!(initial_commit.committer().name, "");
     assert_eq!(initial_commit.committer().email, "");
+    tx.commit("test").unwrap();
 
-    let config = config::Config::builder()
-        .set_override("user.name", "Configured User")
-        .unwrap()
-        .set_override("user.email", "configured.user@example.com")
-        .unwrap()
-        .build()
-        .unwrap();
-    let settings = UserSettings::from_config(config);
+    let mut config = StackedConfig::with_defaults();
+    config.add_layer(
+        ConfigLayer::parse(
+            ConfigSource::User,
+            indoc! {"
+                user.name = 'Configured User'
+                user.email = 'configured.user@example.com'
+            "},
+        )
+        .unwrap(),
+    );
+    let settings = UserSettings::from_config(config).unwrap();
+    let repo = test_env.load_repo_at_head(&settings, test_repo.repo_path());
+    let initial_commit = repo.store().get_commit(initial_commit.id()).unwrap();
+    let mut tx = repo.start_transaction();
     let rewritten_commit = tx
         .repo_mut()
-        .rewrite_commit(&settings, &initial_commit)
+        .rewrite_commit(&initial_commit)
         .write()
         .unwrap();
 
@@ -253,26 +277,23 @@ fn test_rewrite_update_missing_user(backend: TestRepoBackend) {
 #[test_case(TestRepoBackend::Git ; "git backend")]
 fn test_rewrite_resets_author_timestamp(backend: TestRepoBackend) {
     let test_repo = TestRepo::init_with_backend(backend);
-    let repo = &test_repo.repo;
+    let test_env = &test_repo.env;
 
     // Create discardable commit
     let initial_timestamp = "2001-02-03T04:05:06+07:00";
-    let config = testutils::base_config()
-        .set_override("debug.commit-timestamp", initial_timestamp)
-        .unwrap()
-        .build()
-        .unwrap();
-    let settings = UserSettings::from_config(config);
-    let mut tx = repo.start_transaction(&settings);
+    let settings =
+        UserSettings::from_config(config_with_commit_timestamp(initial_timestamp)).unwrap();
+    let repo = test_env.load_repo_at_head(&settings, test_repo.repo_path());
+    let mut tx = repo.start_transaction();
     let initial_commit = tx
         .repo_mut()
         .new_commit(
-            &settings,
             vec![repo.store().root_commit_id().clone()],
             repo.store().empty_merged_tree_id(),
         )
         .write()
         .unwrap();
+    tx.commit("test").unwrap();
 
     let initial_timestamp =
         Timestamp::from_datetime(chrono::DateTime::parse_from_rfc3339(initial_timestamp).unwrap());
@@ -281,18 +302,19 @@ fn test_rewrite_resets_author_timestamp(backend: TestRepoBackend) {
 
     // Rewrite discardable commit to no longer be discardable
     let new_timestamp_1 = "2002-03-04T05:06:07+08:00";
-    let config = testutils::base_config()
-        .set_override("debug.commit-timestamp", new_timestamp_1)
-        .unwrap()
-        .build()
-        .unwrap();
-    let settings = UserSettings::from_config(config);
+    let settings =
+        UserSettings::from_config(config_with_commit_timestamp(new_timestamp_1)).unwrap();
+    let repo = test_env.load_repo_at_head(&settings, test_repo.repo_path());
+    let initial_commit = repo.store().get_commit(initial_commit.id()).unwrap();
+    let mut tx = repo.start_transaction();
     let rewritten_commit_1 = tx
         .repo_mut()
-        .rewrite_commit(&settings, &initial_commit)
+        .rewrite_commit(&initial_commit)
         .set_description("No longer discardable")
         .write()
         .unwrap();
+    tx.repo_mut().rebase_descendants().unwrap();
+    tx.commit("test").unwrap();
 
     let new_timestamp_1 =
         Timestamp::from_datetime(chrono::DateTime::parse_from_rfc3339(new_timestamp_1).unwrap());
@@ -304,18 +326,19 @@ fn test_rewrite_resets_author_timestamp(backend: TestRepoBackend) {
 
     // Rewrite non-discardable commit
     let new_timestamp_2 = "2003-04-05T06:07:08+09:00";
-    let config = testutils::base_config()
-        .set_override("debug.commit-timestamp", new_timestamp_2)
-        .unwrap()
-        .build()
-        .unwrap();
-    let settings = UserSettings::from_config(config);
+    let settings =
+        UserSettings::from_config(config_with_commit_timestamp(new_timestamp_2)).unwrap();
+    let repo = test_env.load_repo_at_head(&settings, test_repo.repo_path());
+    let rewritten_commit_1 = repo.store().get_commit(rewritten_commit_1.id()).unwrap();
+    let mut tx = repo.start_transaction();
     let rewritten_commit_2 = tx
         .repo_mut()
-        .rewrite_commit(&settings, &rewritten_commit_1)
+        .rewrite_commit(&rewritten_commit_1)
         .set_description("New description")
         .write()
         .unwrap();
+    tx.repo_mut().rebase_descendants().unwrap();
+    tx.commit("test").unwrap();
 
     let new_timestamp_2 =
         Timestamp::from_datetime(chrono::DateTime::parse_from_rfc3339(new_timestamp_2).unwrap());
@@ -328,23 +351,21 @@ fn test_rewrite_resets_author_timestamp(backend: TestRepoBackend) {
 #[test_case(TestRepoBackend::Local ; "local backend")]
 // #[test_case(TestRepoBackend::Git ; "git backend")]
 fn test_commit_builder_descendants(backend: TestRepoBackend) {
-    let settings = testutils::user_settings();
     let test_repo = TestRepo::init_with_backend(backend);
     let repo = &test_repo.repo;
     let store = repo.store().clone();
 
-    let mut tx = repo.start_transaction(&settings);
-    let mut graph_builder = CommitGraphBuilder::new(&settings, tx.repo_mut());
+    let mut tx = repo.start_transaction();
+    let mut graph_builder = CommitGraphBuilder::new(tx.repo_mut());
     let commit1 = graph_builder.initial_commit();
     let commit2 = graph_builder.commit_with_parents(&[&commit1]);
     let commit3 = graph_builder.commit_with_parents(&[&commit2]);
-    let repo = tx.commit("test");
+    let repo = tx.commit("test").unwrap();
 
     // Test with for_new_commit()
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     tx.repo_mut()
         .new_commit(
-            &settings,
             vec![store.root_commit_id().clone()],
             store.empty_merged_tree_id(),
         )
@@ -352,34 +373,30 @@ fn test_commit_builder_descendants(backend: TestRepoBackend) {
         .unwrap();
     let rebase_map = tx
         .repo_mut()
-        .rebase_descendants_return_map(&settings)
+        .rebase_descendants_with_options_return_map(Default::default())
         .unwrap();
     assert_eq!(rebase_map.len(), 0);
 
     // Test with for_rewrite_from()
-    let mut tx = repo.start_transaction(&settings);
-    let commit4 = tx
-        .repo_mut()
-        .rewrite_commit(&settings, &commit2)
-        .write()
-        .unwrap();
+    let mut tx = repo.start_transaction();
+    let commit4 = tx.repo_mut().rewrite_commit(&commit2).write().unwrap();
     let rebase_map = tx
         .repo_mut()
-        .rebase_descendants_return_map(&settings)
+        .rebase_descendants_with_options_return_map(Default::default())
         .unwrap();
     assert_rebased_onto(tx.repo_mut(), &rebase_map, &commit3, &[commit4.id()]);
     assert_eq!(rebase_map.len(), 1);
 
     // Test with for_rewrite_from() but new change id
-    let mut tx = repo.start_transaction(&settings);
+    let mut tx = repo.start_transaction();
     tx.repo_mut()
-        .rewrite_commit(&settings, &commit2)
+        .rewrite_commit(&commit2)
         .generate_new_change_id()
         .write()
         .unwrap();
     let rebase_map = tx
         .repo_mut()
-        .rebase_descendants_return_map(&settings)
+        .rebase_descendants_with_options_return_map(Default::default())
         .unwrap();
     assert!(rebase_map.is_empty());
 }

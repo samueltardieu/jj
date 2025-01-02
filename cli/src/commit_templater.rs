@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::cmp::max;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::io;
 use std::rc::Rc;
@@ -24,13 +25,13 @@ use jj_lib::backend::BackendResult;
 use jj_lib::backend::ChangeId;
 use jj_lib::backend::CommitId;
 use jj_lib::commit::Commit;
+use jj_lib::conflicts::ConflictMarkerStyle;
 use jj_lib::copies::CopiesTreeDiffEntry;
 use jj_lib::copies::CopyRecords;
 use jj_lib::extensions_map::ExtensionsMap;
 use jj_lib::fileset;
 use jj_lib::fileset::FilesetDiagnostics;
 use jj_lib::fileset::FilesetExpression;
-use jj_lib::git;
 use jj_lib::id_prefix::IdPrefixContext;
 use jj_lib::id_prefix::IdPrefixIndex;
 use jj_lib::matchers::Matcher;
@@ -43,10 +44,11 @@ use jj_lib::repo::Repo;
 use jj_lib::repo_path::RepoPathUiConverter;
 use jj_lib::revset;
 use jj_lib::revset::Revset;
+use jj_lib::revset::RevsetContainingFn;
 use jj_lib::revset::RevsetDiagnostics;
-use jj_lib::revset::RevsetExpression;
 use jj_lib::revset::RevsetModifier;
 use jj_lib::revset::RevsetParseContext;
+use jj_lib::revset::UserRevsetExpression;
 use jj_lib::store::Store;
 use once_cell::unsync::OnceCell;
 
@@ -94,7 +96,8 @@ pub struct CommitTemplateLanguage<'repo> {
     // are contained in RevsetParseContext for example.
     revset_parse_context: RevsetParseContext<'repo>,
     id_prefix_context: &'repo IdPrefixContext,
-    immutable_expression: Rc<RevsetExpression>,
+    immutable_expression: Rc<UserRevsetExpression>,
+    conflict_marker_style: ConflictMarkerStyle,
     build_fn_table: CommitTemplateBuildFnTable<'repo>,
     keyword_cache: CommitKeywordCache<'repo>,
     cache_extensions: ExtensionsMap,
@@ -103,13 +106,15 @@ pub struct CommitTemplateLanguage<'repo> {
 impl<'repo> CommitTemplateLanguage<'repo> {
     /// Sets up environment where commit template will be transformed to
     /// evaluation tree.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         repo: &'repo dyn Repo,
         path_converter: &'repo RepoPathUiConverter,
         workspace_id: &WorkspaceId,
         revset_parse_context: RevsetParseContext<'repo>,
         id_prefix_context: &'repo IdPrefixContext,
-        immutable_expression: Rc<RevsetExpression>,
+        immutable_expression: Rc<UserRevsetExpression>,
+        conflict_marker_style: ConflictMarkerStyle,
         extensions: &[impl AsRef<dyn CommitTemplateLanguageExtension>],
     ) -> Self {
         let mut build_fn_table = CommitTemplateBuildFnTable::builtin();
@@ -129,6 +134,7 @@ impl<'repo> CommitTemplateLanguage<'repo> {
             revset_parse_context,
             id_prefix_context,
             immutable_expression,
+            conflict_marker_style,
             build_fn_table,
             keyword_cache: CommitKeywordCache::default(),
             cache_extensions,
@@ -404,6 +410,45 @@ impl<'repo> IntoTemplateProperty<'repo> for CommitTemplatePropertyKind<'repo> {
             CommitTemplatePropertyKind::TreeDiff(_) => None,
         }
     }
+
+    fn try_into_eq(self, other: Self) -> Option<Box<dyn TemplateProperty<Output = bool> + 'repo>> {
+        match (self, other) {
+            (CommitTemplatePropertyKind::Core(lhs), CommitTemplatePropertyKind::Core(rhs)) => {
+                lhs.try_into_eq(rhs)
+            }
+            (CommitTemplatePropertyKind::Core(_), _) => None,
+            (CommitTemplatePropertyKind::Commit(_), _) => None,
+            (CommitTemplatePropertyKind::CommitOpt(_), _) => None,
+            (CommitTemplatePropertyKind::CommitList(_), _) => None,
+            (CommitTemplatePropertyKind::RefName(_), _) => None,
+            (CommitTemplatePropertyKind::RefNameOpt(_), _) => None,
+            (CommitTemplatePropertyKind::RefNameList(_), _) => None,
+            (CommitTemplatePropertyKind::CommitOrChangeId(_), _) => None,
+            (CommitTemplatePropertyKind::ShortestIdPrefix(_), _) => None,
+            (CommitTemplatePropertyKind::TreeDiff(_), _) => None,
+        }
+    }
+
+    fn try_into_cmp(
+        self,
+        other: Self,
+    ) -> Option<Box<dyn TemplateProperty<Output = Ordering> + 'repo>> {
+        match (self, other) {
+            (CommitTemplatePropertyKind::Core(lhs), CommitTemplatePropertyKind::Core(rhs)) => {
+                lhs.try_into_cmp(rhs)
+            }
+            (CommitTemplatePropertyKind::Core(_), _) => None,
+            (CommitTemplatePropertyKind::Commit(_), _) => None,
+            (CommitTemplatePropertyKind::CommitOpt(_), _) => None,
+            (CommitTemplatePropertyKind::CommitList(_), _) => None,
+            (CommitTemplatePropertyKind::RefName(_), _) => None,
+            (CommitTemplatePropertyKind::RefNameOpt(_), _) => None,
+            (CommitTemplatePropertyKind::RefNameList(_), _) => None,
+            (CommitTemplatePropertyKind::CommitOrChangeId(_), _) => None,
+            (CommitTemplatePropertyKind::ShortestIdPrefix(_), _) => None,
+            (CommitTemplatePropertyKind::TreeDiff(_), _) => None,
+        }
+    }
 }
 
 /// Table of functions that translate method call node of self type `T`.
@@ -503,7 +548,7 @@ impl<'repo> CommitKeywordCache<'repo> {
         // It's usually smaller than the immutable set. The revset engine can also
         // optimize "::<recent_heads>" query to use bitset-based implementation.
         self.is_immutable_fn.get_or_try_init(|| {
-            let expression = language.immutable_expression.clone();
+            let expression = &language.immutable_expression;
             let revset = evaluate_revset_expression(language, span, expression)?;
             Ok(revset.containing_fn().into())
         })
@@ -703,8 +748,11 @@ fn builtin_commit_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, Comm
         |language, _diagnostics, _build_ctx, self_property, function| {
             function.expect_no_arguments()?;
             let repo = language.repo;
-            let out_property = self_property.map(|commit| extract_git_head(repo, &commit));
-            Ok(L::wrap_ref_name_opt(out_property))
+            let out_property = self_property.map(|commit| {
+                let target = repo.view().git_head();
+                target.added_ids().contains(commit.id())
+            });
+            Ok(L::wrap_boolean(out_property))
         },
     );
     map.insert(
@@ -740,7 +788,7 @@ fn builtin_commit_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, Comm
                 .keyword_cache
                 .is_immutable_fn(language, function.name_span)?
                 .clone();
-            let out_property = self_property.map(move |commit| is_immutable(commit.id()));
+            let out_property = self_property.and_then(move |commit| Ok(is_immutable(commit.id())?));
             Ok(L::wrap_boolean(out_property))
         },
     );
@@ -754,7 +802,7 @@ fn builtin_commit_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, Comm
                     Ok(evaluate_user_revset(language, diagnostics, span, revset)?.containing_fn())
                 })?;
 
-            let out_property = self_property.map(move |commit| is_contained(commit.id()));
+            let out_property = self_property.and_then(move |commit| Ok(is_contained(commit.id())?));
             Ok(L::wrap_boolean(out_property))
         },
     );
@@ -783,7 +831,7 @@ fn builtin_commit_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, Comm
                 expect_fileset_literal(diagnostics, node, language.path_converter)?
             } else {
                 // TODO: defaults to CLI path arguments?
-                // https://github.com/martinvonz/jj/issues/2933#issuecomment-1925870731
+                // https://github.com/jj-vcs/jj/issues/2933#issuecomment-1925870731
                 FilesetExpression::all()
             };
             let repo = language.repo;
@@ -839,22 +887,23 @@ fn expect_fileset_literal(
     })
 }
 
-type RevsetContainingFn<'repo> = dyn Fn(&CommitId) -> bool + 'repo;
-
 fn evaluate_revset_expression<'repo>(
     language: &CommitTemplateLanguage<'repo>,
     span: pest::Span<'_>,
-    expression: Rc<RevsetExpression>,
+    expression: &UserRevsetExpression,
 ) -> Result<Box<dyn Revset + 'repo>, TemplateParseError> {
+    let make_error = || TemplateParseError::expression("Failed to evaluate revset", span);
+    let repo = language.repo;
     let symbol_resolver = revset_util::default_symbol_resolver(
-        language.repo,
+        repo,
         language.revset_parse_context.symbol_resolvers(),
         language.id_prefix_context,
     );
-    let revset =
-        revset_util::evaluate(language.repo, &symbol_resolver, expression).map_err(|err| {
-            TemplateParseError::expression("Failed to evaluate revset", span).with_source(err)
-        })?;
+    let revset = expression
+        .resolve_user_expression(repo, &symbol_resolver)
+        .map_err(|err| make_error().with_source(err))?
+        .evaluate(repo)
+        .map_err(|err| make_error().with_source(err))?;
     Ok(revset)
 }
 
@@ -876,7 +925,7 @@ fn evaluate_user_revset<'repo>(
     });
     let (None | Some(RevsetModifier::All)) = modifier;
 
-    evaluate_revset_expression(language, span, expression)
+    evaluate_revset_expression(language, span, &expression)
 }
 
 /// Bookmark or tag name with metadata.
@@ -1006,7 +1055,7 @@ impl RefName {
     fn is_tracking_present(&self) -> bool {
         self.tracking_ref
             .as_ref()
-            .map_or(false, |tracking| tracking.target.is_present())
+            .is_some_and(|tracking| tracking.target.is_present())
     }
 
     /// Number of commits ahead of the tracking local ref.
@@ -1019,7 +1068,7 @@ impl RefName {
             .get_or_try_init(|| {
                 let self_ids = self.target.added_ids().cloned().collect_vec();
                 let other_ids = tracking.target.added_ids().cloned().collect_vec();
-                Ok(revset::walk_revs(repo, &self_ids, &other_ids)?.count_estimate())
+                Ok(revset::walk_revs(repo, &self_ids, &other_ids)?.count_estimate()?)
             })
             .copied()
     }
@@ -1034,7 +1083,7 @@ impl RefName {
             .get_or_try_init(|| {
                 let self_ids = self.target.added_ids().cloned().collect_vec();
                 let other_ids = tracking.target.added_ids().cloned().collect_vec();
-                Ok(revset::walk_revs(repo, &other_ids, &self_ids)?.count_estimate())
+                Ok(revset::walk_revs(repo, &other_ids, &self_ids)?.count_estimate()?)
             })
             .copied()
     }
@@ -1228,14 +1277,6 @@ fn build_ref_names_index<'a>(
         index.insert(target.added_ids(), ref_name);
     }
     index
-}
-
-fn extract_git_head(repo: &dyn Repo, commit: &Commit) -> Option<Rc<RefName>> {
-    let target = repo.view().git_head();
-    target
-        .added_ids()
-        .contains(commit.id())
-        .then(|| RefName::remote_only("HEAD", git::REMOTE_NAME_FOR_LOCAL_GIT_REPO, target.clone()))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1512,6 +1553,7 @@ fn builtin_tree_diff_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, T
                 })
                 .transpose()?;
             let path_converter = language.path_converter;
+            let conflict_marker_style = language.conflict_marker_style;
             let template = (self_property, context_property)
                 .map(move |(diff, context)| {
                     // TODO: load defaults from UserSettings?
@@ -1529,6 +1571,7 @@ fn builtin_tree_diff_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, T
                             tree_diff,
                             path_converter,
                             &options,
+                            conflict_marker_style,
                         )
                     })
                 })
@@ -1550,8 +1593,9 @@ fn builtin_tree_diff_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, T
                     )
                 })
                 .transpose()?;
+            let conflict_marker_style = language.conflict_marker_style;
             let template = (self_property, context_property)
-                .map(|(diff, context)| {
+                .map(move |(diff, context)| {
                     let options = diff_util::UnifiedDiffOptions {
                         context: context.unwrap_or(diff_util::DEFAULT_CONTEXT_LINES),
                         line_diff: diff_util::LineDiffOptions {
@@ -1559,7 +1603,13 @@ fn builtin_tree_diff_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, T
                         },
                     };
                     diff.into_formatted(move |formatter, store, tree_diff| {
-                        diff_util::show_git_diff(formatter, store, tree_diff, &options)
+                        diff_util::show_git_diff(
+                            formatter,
+                            store,
+                            tree_diff,
+                            &options,
+                            conflict_marker_style,
+                        )
                     })
                 })
                 .into_template();
@@ -1577,6 +1627,7 @@ fn builtin_tree_diff_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, T
                 width_node,
             )?;
             let path_converter = language.path_converter;
+            let conflict_marker_style = language.conflict_marker_style;
             let template = (self_property, width_property)
                 .map(move |(diff, width)| {
                     let options = diff_util::DiffStatOptions {
@@ -1592,6 +1643,7 @@ fn builtin_tree_diff_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, T
                             path_converter,
                             &options,
                             width,
+                            conflict_marker_style,
                         )
                     })
                 })

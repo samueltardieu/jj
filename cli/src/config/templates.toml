@@ -16,10 +16,9 @@ commit_summary = 'format_commit_summary_with_refs(self, bookmarks)'
 
 annotate_commit_summary = '''
 separate(" ",
-  format_short_id(change_id),
-  format_short_id(commit_id),
-  format_short_signature(author),
-  format_timestamp(committer.timestamp()),
+  change_id.shortest(8),
+  pad_end(8, truncate_end(8, author.email().local())),
+  commit_timestamp(self).local().format('%Y-%m-%d %H:%M:%S'),
 )
 '''
 
@@ -30,8 +29,6 @@ if(overridden,
 ) ++ "\n"
 '''
 
-# TODO: Provide hook point for diff customization (#1946)? We might want a
-# syntax to comment out full text diffs without using the "JJ: " prefix.
 draft_commit_description = '''
 concat(
   description,
@@ -73,12 +70,12 @@ if(root,
     concat(
       separate(" ",
         format_short_change_id_with_hidden_and_divergent_info(self),
-        if(author.email(), author.username(), email_placeholder),
-        format_timestamp(committer.timestamp()),
+        if(author.email(), author.email().local(), email_placeholder),
+        format_timestamp(commit_timestamp(self)),
         bookmarks,
         tags,
         working_copies,
-        git_head,
+        if(git_head, label("git_head", "git_head()")),
         format_short_commit_id(commit_id),
         if(conflict, label("conflict", "conflict")),
         if(empty, label("empty", "(empty)")),
@@ -91,22 +88,13 @@ if(root,
   )
 )
 '''
+
 builtin_log_compact = '''
 if(root,
   format_root_commit(self),
   label(if(current_working_copy, "working_copy"),
     concat(
-      separate(" ",
-        format_short_change_id_with_hidden_and_divergent_info(self),
-        format_short_signature(author),
-        format_timestamp(committer.timestamp()),
-        bookmarks,
-        tags,
-        working_copies,
-        git_head,
-        format_short_commit_id(commit_id),
-        if(conflict, label("conflict", "conflict")),
-      ) ++ "\n",
+      format_short_commit_header(self) ++ "\n",
       separate(" ",
         if(empty, label("empty", "(empty)")),
         if(description,
@@ -118,14 +106,33 @@ if(root,
   )
 )
 '''
+
+builtin_log_compact_full_description = '''
+if(root,
+  format_root_commit(self),
+  label(if(current_working_copy, "working_copy"),
+    concat(
+      format_short_commit_header(self) ++ "\n",
+      separate(" ",
+        if(empty, label("empty", "(empty)")),
+        if(description,
+          description,
+          label(if(empty, "empty"), description_placeholder),
+        ),
+      ) ++ "\n",
+    ),
+  )
+)
+'''
+
 builtin_log_comfortable = 'builtin_log_compact ++ "\n"'
 builtin_log_detailed = '''
 concat(
   "Commit ID: " ++ commit_id ++ "\n",
   "Change ID: " ++ change_id ++ "\n",
   surround("Bookmarks: ", "\n", separate(" ", local_bookmarks, remote_bookmarks)),
-  surround("Tags: ", "\n", tags),
-  "Author: " ++ format_detailed_signature(author) ++ "\n",
+  surround("Tags     : ", "\n", tags),
+  "Author   : " ++ format_detailed_signature(author) ++ "\n",
   "Committer: " ++ format_detailed_signature(committer)  ++ "\n",
   "\n",
   indent("    ",
@@ -151,6 +158,7 @@ name_placeholder = 'label("name placeholder", "(no name set)")'
 commit_summary_separator = 'label("separator", " | ")'
 
 # Hook points for users to customize the default templates:
+'commit_timestamp(commit)' = 'commit.committer().timestamp()'
 'format_short_id(id)' = 'id.shortest(8)'
 'format_short_change_id(id)' = 'format_short_id(id)'
 'format_short_commit_id(id)' = 'format_short_id(id)'
@@ -241,6 +249,20 @@ if(commit.hidden(),
     format_short_change_id(commit.change_id()) ++ if(commit.divergent(), "??")
   )
 )
+'''
+
+'format_short_commit_header(commit)' = '''
+separate(" ",
+        format_short_change_id_with_hidden_and_divergent_info(commit),
+        format_short_signature(commit.author()),
+        format_timestamp(commit_timestamp(commit)),
+        commit.bookmarks(),
+        commit.tags(),
+        commit.working_copies(),
+        if(commit.git_head(), label("git_head", "git_head()")),
+        format_short_commit_id(commit.commit_id()),
+        if(commit.conflict(), label("conflict", "conflict")),
+      )
 '''
 
 builtin_log_node = '''

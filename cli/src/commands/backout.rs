@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use clap_complete::ArgValueCandidates;
 use itertools::Itertools as _;
 use jj_lib::object_id::ObjectId;
 use jj_lib::rewrite::merge_commit_trees;
@@ -20,18 +21,29 @@ use tracing::instrument;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
 use crate::command_error::CommandError;
+use crate::complete;
 use crate::ui::Ui;
 
 /// Apply the reverse of a revision on top of another revision
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct BackoutArgs {
     /// The revision(s) to apply the reverse of
-    #[arg(long, short, default_value = "@")]
+    #[arg(
+        long, short,
+        default_value = "@",
+        value_name = "REVSETS",
+        add = ArgValueCandidates::new(complete::all_revisions),
+    )]
     revisions: Vec<RevisionArg>,
     /// The revision to apply the reverse changes on top of
     // TODO: It seems better to default this to `@-`. Maybe the working
     // copy should be rebased on top?
-    #[arg(long, short, default_value = "@")]
+    #[arg(
+        long, short,
+        default_value = "@",
+        value_name = "REVSETS",
+        add = ArgValueCandidates::new(complete::all_revisions),
+    )]
     destination: Vec<RevisionArg>,
 }
 
@@ -83,7 +95,7 @@ pub(crate) fn cmd_backout(
         let new_parent_ids = parents.iter().map(|commit| commit.id().clone()).collect();
         let new_commit = tx
             .repo_mut()
-            .new_commit(command.settings(), new_parent_ids, new_tree.id())
+            .new_commit(new_parent_ids, new_tree.id())
             .set_description(new_commit_description)
             .write()?;
         parents = vec![new_commit];

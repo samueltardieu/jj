@@ -61,13 +61,13 @@ fn test_restore() {
     insta::assert_snapshot!(stderr, @r###"
     Created rlvkpnrz b9b6011e (empty) (no description set)
     Rebased 1 descendant commits
-    Working copy now at: kkmpptxz d05c4d2a (conflict) (no description set)
+    Working copy now at: kkmpptxz 5b361547 (conflict) (no description set)
     Parent commit      : rlvkpnrz b9b6011e (empty) (no description set)
     Added 0 files, modified 1 files, removed 0 files
     There are unresolved conflicts at these paths:
     file2    2-sided conflict including 1 deletion
     New conflicts appeared in these commits:
-      kkmpptxz d05c4d2a (conflict) (no description set)
+      kkmpptxz 5b361547 (conflict) (no description set)
     To resolve the conflicts, start by updating to it:
       jj new kkmpptxz
     Then use `jj resolve`, or edit the conflict markers in the file directly.
@@ -199,8 +199,8 @@ fn test_restore_conflicted_merge() {
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["restore", "file"]);
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
-    Created vruxwmqv 126facb5 conflict | (conflict) (empty) conflict
-    Working copy now at: vruxwmqv 126facb5 conflict | (conflict) (empty) conflict
+    Created vruxwmqv 25a37060 conflict | (conflict) (empty) conflict
+    Working copy now at: vruxwmqv 25a37060 conflict | (conflict) (empty) conflict
     Parent commit      : zsuskuln aa493daf a | a
     Parent commit      : royxmykx db6a4daf b | b
     Added 0 files, modified 1 files, removed 0 files
@@ -240,8 +240,8 @@ fn test_restore_conflicted_merge() {
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["restore"]);
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
-    Created vruxwmqv b553ebcf conflict | (conflict) (empty) conflict
-    Working copy now at: vruxwmqv b553ebcf conflict | (conflict) (empty) conflict
+    Created vruxwmqv f2c82b9c conflict | (conflict) (empty) conflict
+    Working copy now at: vruxwmqv f2c82b9c conflict | (conflict) (empty) conflict
     Parent commit      : zsuskuln aa493daf a | a
     Parent commit      : royxmykx db6a4daf b | b
     Added 0 files, modified 1 files, removed 0 files
@@ -315,7 +315,7 @@ fn test_restore_restore_descendants() {
 
     // Check that "a", "b", and "ab" have their expected content by diffing them.
     // "ab" must have kept its content.
-    insta::assert_snapshot!(test_env.jj_cmd_success(&repo_path, &["diff", "--from=a", "--to=ab", "--git"]), @r#"
+    insta::assert_snapshot!(test_env.jj_cmd_success(&repo_path, &["diff", "--from=a", "--to=ab", "--git"]), @r"
     diff --git a/file b/file
     index 7898192261..81bf396956 100644
     --- a/file
@@ -328,9 +328,9 @@ fn test_restore_restore_descendants() {
     index 0000000000..6178079822
     --- /dev/null
     +++ b/file2
-    @@ -1,0 +1,1 @@
+    @@ -0,0 +1,1 @@
     +b
-    "#);
+    ");
     insta::assert_snapshot!(test_env.jj_cmd_success(&repo_path, &["diff", "--from=b", "--to=ab", "--git"]), @r#"
     diff --git a/file b/file
     index df967b96a5..81bf396956 100644

@@ -6,14 +6,14 @@ This is a plan to implement more Git-like remote tracking branch UX.
 
 `jj` imports all remote branches to local branches by default. As described in
 [#1136], this doesn't interact nicely with Git if we have multiple Git remotes
-with a number of branches. The `git.auto-local-branch` config can mitigate this
+with a number of branches. The `git.auto-local-bookmark` config can mitigate this
 problem, but we'll get locally-deleted branches instead.
 
 The goal of this plan is to implement
 * proper support for tracking/non-tracking remote branches
 * logically consistent data model for importing/exporting Git refs
 
-[#1136]: https://github.com/martinvonz/jj/issues/1136
+[#1136]: https://github.com/jj-vcs/jj/issues/1136
 
 ## Current data model (as of jj 0.8.0)
 
@@ -120,14 +120,14 @@ With the proposed data model, we can
 
 ### Tracking state
 
-The `git.auto-local-branch` config knob is applied when importing new remote
+The `git.auto-local-bookmark` config knob is applied when importing new remote
 branch. `jj branch` sub commands will be added to change the tracking state.
 
 ```rust
 fn default_state_for_newly_imported_branch(config, remote) {
     if remote == "git" {
         State::Tracking
-    } else if config["git.auto-local-branch"] {
+    } else if config["git.auto-local-bookmark"] {
         State::Tracking
     } else {
         State::New
@@ -155,7 +155,7 @@ fn target_in_merge_context(known_target, state) {
 * New `remotes[remote].branches` corresponds to
   `branches[].remote_targets[remote]`.
 * `state = new|tracking` doesn't exist in the current model. It's determined
-  by `git.auto-local-branch` config.
+  by `git.auto-local-bookmark` config.
 
 ## Common command behaviors
 
@@ -352,7 +352,7 @@ Note: desired behavior of `jj branch forget` is to
 
 ## Remaining issues
 
-* https://github.com/martinvonz/jj/issues/1278 pushing to tracked remote
+* https://github.com/jj-vcs/jj/issues/1278 pushing to tracked remote
   * Option could be added to push to all `tracking` remotes?
 * Track remote branch locally with different name
   * Local branch name could be stored per remote branch
@@ -365,8 +365,8 @@ Note: desired behavior of `jj branch forget` is to
 
 ## References
 
-* https://github.com/martinvonz/jj/issues/1136
-* https://github.com/martinvonz/jj/issues/1666
-* https://github.com/martinvonz/jj/issues/1690
-* https://github.com/martinvonz/jj/issues/1734
-* https://github.com/martinvonz/jj/pull/1739
+* https://github.com/jj-vcs/jj/issues/1136
+* https://github.com/jj-vcs/jj/issues/1666
+* https://github.com/jj-vcs/jj/issues/1690
+* https://github.com/jj-vcs/jj/issues/1734
+* https://github.com/jj-vcs/jj/pull/1739

@@ -3,22 +3,34 @@
 [aliases]
 amend = ["squash"]
 b = ["bookmark"]
-co = ["checkout"]
+ci = ["commit"]
 unamend = ["unsquash"]
 
 [diff.color-words]
 max-inline-alternation = 3
+context = 3
+
+[diff.git]
+context = 3
 
 [ui]
 # TODO: delete ui.allow-filesets in jj 0.26+
 allow-filesets = true
+allow-init-native = false
 always-allow-large-revsets = false
+color = "auto"
+default-description = ""
 diff-instructions = true
 graph.style = "curved"
+# let user override pager.env independently
+pager.command = ["less", "-FRX"]
+pager.env = { LESSCHARSET = "utf-8" }
 paginate = "auto"
-pager = { command = ["less", "-FRX"], env = { LESSCHARSET = "utf-8" } }
+progress-indicator = true
+quiet = false
 log-word-wrap = false
 log-synthetic-elided-nodes = true
+conflict-marker-style = "diff"
 
 [ui.movement]
 edit = false
@@ -26,3 +38,4 @@ edit = false
 [snapshot]
 max-new-file-size = "1MiB"
 auto-track = "all()"
+auto-update-stale = false

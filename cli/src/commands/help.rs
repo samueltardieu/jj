@@ -12,6 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Write as _;
+use std::io::Write;
+
+use clap::builder::PossibleValue;
+use clap::builder::StyledStr;
+use crossterm::style::Stylize;
+use itertools::Itertools;
 use tracing::instrument;
 
 use crate::cli_util::CommandHelper;
@@ -24,19 +31,38 @@ use crate::ui::Ui;
 pub(crate) struct HelpArgs {
     /// Print help for the subcommand(s)
     pub(crate) command: Vec<String>,
+    /// Show help for keywords instead of commands
+    #[arg(
+        long,
+        short = 'k',
+        conflicts_with = "command",
+        value_parser = KEYWORDS
+            .iter()
+            .map(|k| PossibleValue::new(k.name).help(k.description))
+            .collect_vec()
+    )]
+    pub(crate) keyword: Option<String>,
 }
 
 #[instrument(skip_all)]
 pub(crate) fn cmd_help(
-    _ui: &mut Ui,
+    ui: &mut Ui,
     command: &CommandHelper,
     args: &HelpArgs,
 ) -> Result<(), CommandError> {
+    if let Some(name) = &args.keyword {
+        let keyword = find_keyword(name).expect("clap should check this with `value_parser`");
+        ui.request_pager();
+        write!(ui.stdout(), "{}", keyword.content)?;
+
+        return Ok(());
+    }
+
     let mut args_to_show_help = vec![command.app().get_name()];
     args_to_show_help.extend(args.command.iter().map(|s| s.as_str()));
     args_to_show_help.push("--help");
 
-    // TODO: `help log -- -r` will gives an cryptic error, ideally, it should state
+    // TODO: `help log -- -r` will give a cryptic error, ideally, it should state
     // that the subcommand `log -r` doesn't exist.
     let help_err = command
         .app()
@@ -46,4 +72,78 @@ pub(crate) fn cmd_help(
         .expect_err("Clap library should return a DisplayHelp error in this context");
 
     Err(command_error::cli_error(help_err))
+}
+
+#[derive(Clone)]
+struct Keyword {
+    name: &'static str,
+    description: &'static str,
+    content: &'static str,
+}
+
+// TODO: Add all documentation to keywords
+//
+// Maybe adding some code to build.rs to find all the docs files and build the
+// `KEYWORDS` at compile time.
+//
+// It would be cool to follow the docs hierarchy somehow.
+//
+// One of the problems would be `config.md`, as it has the same name as a
+// subcommand.
+//
+// TODO: Find a way to render markdown using ANSI escape codes.
+//
+// Maybe we can steal some ideas from https://github.com/jj-vcs/jj/pull/3130
+const KEYWORDS: &[Keyword] = &[
+    Keyword {
+        name: "bookmarks",
+        description: "Named pointers to revisions (similar to Git's branches)",
+        content: include_str!(concat!("../../", env!("JJ_DOCS_DIR"), "bookmarks.md")),
+    },
+    Keyword {
+        name: "config",
+        description: "How and where to set configuration options",
+        content: include_str!(concat!("../../", env!("JJ_DOCS_DIR"), "config.md")),
+    },
+    Keyword {
+        name: "filesets",
+        description: "A functional language for selecting a set of files",
+        content: include_str!(concat!("../../", env!("JJ_DOCS_DIR"), "filesets.md")),
+    },
+    Keyword {
+        name: "glossary",
+        description: "Definitions of various terms",
+        content: include_str!(concat!("../../", env!("JJ_DOCS_DIR"), "glossary.md")),
+    },
+    Keyword {
+        name: "revsets",
+        description: "A functional language for selecting a set of revision",
+        content: include_str!(concat!("../../", env!("JJ_DOCS_DIR"), "revsets.md")),
+    },
+    Keyword {
+        name: "templates",
+        description: "A functional language to customize command output",
+        content: include_str!(concat!("../../", env!("JJ_DOCS_DIR"), "templates.md")),
+    },
+    Keyword {
+        name: "tutorial",
+        description: "Show a tutorial to get started with jj",
+        content: include_str!(concat!("../../", env!("JJ_DOCS_DIR"), "tutorial.md")),
+    },
+];
+
+fn find_keyword(name: &str) -> Option<&Keyword> {
+    KEYWORDS.iter().find(|keyword| keyword.name == name)
+}
+
+pub fn show_keyword_hint_after_help() -> StyledStr {
+    let mut ret = StyledStr::new();
+    writeln!(
+        ret,
+        "{} lists available keywords. Use {} to show help for one of these keywords.",
+        "'jj help --help'".bold(),
+        "'jj help -k'".bold(),
+    )
+    .unwrap();
+    ret
 }

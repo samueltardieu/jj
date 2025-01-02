@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use clap::builder::NonEmptyStringValueParser;
+use clap_complete::ArgValueCandidates;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::RefTarget;
 
@@ -22,13 +23,19 @@ use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
 use crate::command_error::user_error_with_hint;
 use crate::command_error::CommandError;
+use crate::complete;
 use crate::ui::Ui;
 
 /// Create or update a bookmark to point to a certain commit
 #[derive(clap::Args, Clone, Debug)]
 pub struct BookmarkSetArgs {
     /// The bookmark's target revision
-    #[arg(long, short, visible_alias = "to")]
+    #[arg(
+        long, short,
+        visible_alias = "to",
+        value_name = "REVSET",
+        add = ArgValueCandidates::new(complete::all_revisions),
+    )]
     revision: Option<RevisionArg>,
 
     /// Allow moving the bookmark backwards or sideways
@@ -36,7 +43,11 @@ pub struct BookmarkSetArgs {
     allow_backwards: bool,
 
     /// The bookmarks to update
-    #[arg(required = true, value_parser = NonEmptyStringValueParser::new())]
+    #[arg(
+        required = true,
+        value_parser = NonEmptyStringValueParser::new(),
+        add = ArgValueCandidates::new(complete::local_bookmarks),
+    )]
     names: Vec<String>,
 }
 

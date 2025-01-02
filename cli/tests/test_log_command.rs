@@ -23,7 +23,7 @@ fn test_log_with_empty_revision() {
 
     let stderr = test_env.jj_cmd_cli_error(&repo_path, &["log", "-r="]);
     insta::assert_snapshot!(stderr, @r###"
-    error: a value is required for '--revisions <REVISIONS>' but none was supplied
+    error: a value is required for '--revisions <REVSETS>' but none was supplied
 
     For more information, try '--help'.
     "###);
@@ -43,6 +43,7 @@ fn test_log_with_no_template() {
     Hint: The following template aliases are defined:
     - builtin_log_comfortable
     - builtin_log_compact
+    - builtin_log_compact_full_description
     - builtin_log_detailed
     - builtin_log_node
     - builtin_log_node_ascii
@@ -111,7 +112,7 @@ fn test_log_with_or_without_diff() {
 
     // `-s` for summary, `--git` for git diff (which implies `-p`)
     let stdout = test_env.jj_cmd_success(&repo_path, &["log", "-T", "description", "-s", "--git"]);
-    insta::assert_snapshot!(stdout, @r###"
+    insta::assert_snapshot!(stdout, @r"
     @  a new commit
     │  M file1
     │  diff --git a/file1 b/file1
@@ -128,10 +129,10 @@ fn test_log_with_or_without_diff() {
     │  index 0000000000..257cc5642c
     │  --- /dev/null
     │  +++ b/file1
-    │  @@ -1,0 +1,1 @@
+    │  @@ -0,0 +1,1 @@
     │  +foo
     ◆
-    "###);
+    ");
 
     // `-p` enables default "summary" output, so `-s` is noop
     let stdout = test_env.jj_cmd_success(
@@ -142,7 +143,7 @@ fn test_log_with_or_without_diff() {
             "description",
             "-p",
             "-s",
-            "--config-toml=ui.diff.format='summary'",
+            "--config=ui.diff.format=summary",
         ],
     );
     insta::assert_snapshot!(stdout, @r###"
@@ -174,7 +175,7 @@ fn test_log_with_or_without_diff() {
         &repo_path,
         &["log", "-T", "description", "--no-graph", "-p", "--git"],
     );
-    insta::assert_snapshot!(stdout, @r###"
+    insta::assert_snapshot!(stdout, @r"
     a new commit
     diff --git a/file1 b/file1
     index 257cc5642c..3bd1f0e297 100644
@@ -189,9 +190,9 @@ fn test_log_with_or_without_diff() {
     index 0000000000..257cc5642c
     --- /dev/null
     +++ b/file1
-    @@ -1,0 +1,1 @@
+    @@ -0,0 +1,1 @@
     +foo
-    "###);
+    ");
 
     // Cannot use both `--git` and `--color-words`
     let stderr = test_env.jj_cmd_cli_error(
@@ -209,7 +210,7 @@ fn test_log_with_or_without_diff() {
     insta::assert_snapshot!(stderr, @r###"
     error: the argument '--git' cannot be used with '--color-words'
 
-    Usage: jj log --template <TEMPLATE> --no-graph --patch --git [PATHS]...
+    Usage: jj log --template <TEMPLATE> --no-graph --patch --git [FILESETS]...
 
     For more information, try '--help'.
     "###);
@@ -460,7 +461,7 @@ fn test_log_bad_short_prefixes() {
       | ^---
       |
       = expected <identifier> or <expression>
-    For help, see https://martinvonz.github.io/jj/latest/config/.
+    For help, see https://jj-vcs.github.io/jj/latest/config/.
     "###);
 
     // Warn on resolution of short prefixes
@@ -739,8 +740,8 @@ fn test_log_author_format() {
         test_env.jj_cmd_success(
             &repo_path,
             &[
-                "--config-toml",
-                &format!("{decl}='signature.username()'"),
+                "--config",
+                &format!("{decl}='signature.email().local()'"),
                 "log",
                 "--revisions=@",
             ],
@@ -775,12 +776,12 @@ fn test_log_divergence() {
         &["describe", "-m", "description 2", "--at-operation", "@-"],
     );
     let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["log", "-T", template]);
-    insta::assert_snapshot!(stdout, @r###"
-    ○  description 2 !divergence!
-    │ @  description 1 !divergence!
+    insta::assert_snapshot!(stdout, @r#"
+    @  description 1 !divergence!
+    │ ○  description 2 !divergence!
     ├─╯
     ◆
-    "###);
+    "#);
     insta::assert_snapshot!(stderr, @r###"
     Concurrent modification detected, resolving automatically.
     "###);
@@ -862,7 +863,7 @@ fn test_log_filtered_by_path() {
         test_env.env_root(),
         &[
             "log",
-            "--config-toml=ui.allow-filesets=false",
+            "--config=ui.allow-filesets=false",
             "-R",
             repo_path.to_str().unwrap(),
             "all()",
@@ -1319,14 +1320,13 @@ fn test_graph_styles() {
     "###);
 
     // Invalid style name
-    let stderr = test_env.jj_cmd_failure(
-        &repo_path,
-        &["log", "--config-toml=ui.graph.style='unknown'"],
-    );
-    insta::assert_snapshot!(stderr, @r###"
-    Config error: enum GraphStyle does not have variant constructor unknown
-    For help, see https://martinvonz.github.io/jj/latest/config/.
-    "###);
+    let stderr = test_env.jj_cmd_failure(&repo_path, &["log", "--config=ui.graph.style=unknown"]);
+    insta::assert_snapshot!(stderr, @r"
+    Config error: Invalid type or value for ui.graph.style
+    Caused by: unknown variant `unknown`, expected one of `ascii`, `ascii-large`, `curved`, `square`
+
+    For help, see https://jj-vcs.github.io/jj/latest/config/.
+    ");
 }
 
 #[test]
@@ -1337,7 +1337,7 @@ fn test_log_word_wrap() {
     let render = |args: &[&str], columns: u32, word_wrap: bool| {
         let mut args = args.to_vec();
         if word_wrap {
-            args.push("--config-toml=ui.log-word-wrap=true");
+            args.push("--config=ui.log-word-wrap=true");
         }
         let assert = test_env
             .jj_cmd(&repo_path, &args)
@@ -1651,4 +1651,33 @@ fn test_log_with_custom_symbols() {
     |
     ^
     "###);
+}
+
+#[test]
+fn test_log_full_description_template() {
+    let test_env = TestEnvironment::default();
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "init", "repo"]);
+    let repo_path = test_env.env_root().join("repo");
+
+    test_env.jj_cmd_ok(
+        &repo_path,
+        &[
+            "describe",
+            "-m",
+            "this is commit with a multiline description\n\n<full description>",
+        ],
+    );
+
+    let log = test_env.jj_cmd_success(
+        &repo_path,
+        &["log", "-T", "builtin_log_compact_full_description"],
+    );
+    insta::assert_snapshot!(log, @r#"
+    @  qpvuntsm test.user@example.com 2001-02-03 08:05:08 1c504ec6
+    │  (empty) this is commit with a multiline description
+    │
+    │  <full description>
+    │
+    ◆  zzzzzzzz root() 00000000
+    "#);
 }

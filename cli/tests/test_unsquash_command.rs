@@ -240,7 +240,7 @@ fn test_unsquash_partial() {
         &repo_path,
         &[
             "unsquash",
-            "--config-toml=ui.diff-editor='false'",
+            "--config=ui.diff-editor='false'",
             "--tool=fake-diff-editor",
         ],
     );
@@ -329,7 +329,7 @@ fn test_unsquash_description() {
     JJ: Description from source commit:
     source
 
-    JJ: Lines starting with "JJ: " (like this one) will be removed.
+    JJ: Lines starting with "JJ:" (like this one) will be removed.
     "###);
 
     // If the source's *content* doesn't become empty, then the source remains and

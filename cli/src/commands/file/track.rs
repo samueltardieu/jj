@@ -14,9 +14,9 @@
 
 use std::io::Write;
 
-use jj_lib::working_copy::SnapshotOptions;
 use tracing::instrument;
 
+use crate::cli_util::print_snapshot_stats;
 use crate::cli_util::CommandHelper;
 use crate::command_error::CommandError;
 use crate::ui::Ui;
@@ -33,7 +33,7 @@ use crate::ui::Ui;
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct FileTrackArgs {
     /// Paths to track
-    #[arg(required = true, value_hint = clap::ValueHint::AnyPath)]
+    #[arg(required = true, value_name = "FILESETS", value_hint = clap::ValueHint::AnyPath)]
     paths: Vec<String>,
 }
 
@@ -47,22 +47,17 @@ pub(crate) fn cmd_file_track(
     let matcher = workspace_command
         .parse_file_patterns(ui, &args.paths)?
         .to_matcher();
+    let options = workspace_command.snapshot_options_with_start_tracking_matcher(&matcher)?;
 
     let mut tx = workspace_command.start_transaction().into_inner();
-    let base_ignores = workspace_command.base_ignores()?;
     let (mut locked_ws, _wc_commit) = workspace_command.start_working_copy_mutation()?;
-    locked_ws.locked_wc().snapshot(&SnapshotOptions {
-        base_ignores,
-        fsmonitor_settings: command.settings().fsmonitor_settings()?,
-        progress: None,
-        start_tracking_matcher: &matcher,
-        max_new_file_size: command.settings().max_new_file_size()?,
-    })?;
-    let num_rebased = tx.repo_mut().rebase_descendants(command.settings())?;
+    let (_tree_id, stats) = locked_ws.locked_wc().snapshot(&options)?;
+    let num_rebased = tx.repo_mut().rebase_descendants()?;
     if num_rebased > 0 {
         writeln!(ui.status(), "Rebased {num_rebased} descendant commits")?;
     }
-    let repo = tx.commit("track paths");
+    let repo = tx.commit("track paths")?;
     locked_ws.finish(repo.op_id().clone())?;
+    print_snapshot_stats(ui, &stats, workspace_command.env().path_converter())?;
     Ok(())
 }

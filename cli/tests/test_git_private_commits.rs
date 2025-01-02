@@ -37,7 +37,7 @@ fn set_up() -> (TestEnvironment, PathBuf) {
         &[
             "git",
             "clone",
-            "--config-toml=git.auto-local-branch=true",
+            "--config=git.auto-local-bookmark=true",
             origin_git_repo_path.to_str().unwrap(),
             "local",
         ],
@@ -67,7 +67,14 @@ fn set_up_remote_at_main(test_env: &TestEnvironment, workspace_root: &Path, remo
     );
     test_env.jj_cmd_ok(
         workspace_root,
-        &["git", "push", "--remote", remote_name, "-b=main"],
+        &[
+            "git",
+            "push",
+            "--allow-new",
+            "--remote",
+            remote_name,
+            "-b=main",
+        ],
     );
 }
 
@@ -81,9 +88,11 @@ fn test_git_private_commits_block_pushing() {
     // Will not push when a pushed commit is contained in git.private-commits
     test_env.add_config(r#"git.private-commits = "description(glob:'private*')""#);
     let stderr = test_env.jj_cmd_failure(&workspace_root, &["git", "push", "--all"]);
-    insta::assert_snapshot!(stderr, @r###"
+    insta::assert_snapshot!(stderr, @r"
     Error: Won't push commit aa3058ff8663 since it is private
-    "###);
+    Hint: Rejected commit: yqosqzyt aa3058ff main* | (empty) private 1
+    Hint: Configured git.private-commits: 'description(glob:'private*')'
+    ");
 
     // May push when the commit is removed from git.private-commits
     test_env.add_config(r#"git.private-commits = "none()""#);
@@ -107,9 +116,11 @@ fn test_git_private_commits_can_be_overridden() {
     // Will not push when a pushed commit is contained in git.private-commits
     test_env.add_config(r#"git.private-commits = "description(glob:'private*')""#);
     let stderr = test_env.jj_cmd_failure(&workspace_root, &["git", "push", "--all"]);
-    insta::assert_snapshot!(stderr, @r###"
+    insta::assert_snapshot!(stderr, @r"
     Error: Won't push commit aa3058ff8663 since it is private
-    "###);
+    Hint: Rejected commit: yqosqzyt aa3058ff main* | (empty) private 1
+    Hint: Configured git.private-commits: 'description(glob:'private*')'
+    ");
 
     // May push when the commit is removed from git.private-commits
     let (_, stderr) = test_env.jj_cmd_ok(
@@ -155,10 +166,15 @@ fn test_git_private_commits_not_directly_in_line_block_pushing() {
     test_env.jj_cmd_ok(&workspace_root, &["bookmark", "create", "bookmark1"]);
 
     test_env.add_config(r#"git.private-commits = "description(glob:'private*')""#);
-    let stderr = test_env.jj_cmd_failure(&workspace_root, &["git", "push", "-b=bookmark1"]);
-    insta::assert_snapshot!(stderr, @r###"
+    let stderr = test_env.jj_cmd_failure(
+        &workspace_root,
+        &["git", "push", "--allow-new", "-b=bookmark1"],
+    );
+    insta::assert_snapshot!(stderr, @r"
     Error: Won't push commit f1253a9b1ea9 since it is private
-    "###);
+    Hint: Rejected commit: yqosqzyt f1253a9b (empty) private 1
+    Hint: Configured git.private-commits: 'description(glob:'private*')'
+    ");
 }
 
 #[test]
@@ -192,8 +208,10 @@ fn test_git_private_commits_already_on_the_remote_do_not_block_push() {
     test_env.jj_cmd_ok(&workspace_root, &["new", "main", "-m=private 1"]);
     test_env.jj_cmd_ok(&workspace_root, &["new", "-m=public 3"]);
     test_env.jj_cmd_ok(&workspace_root, &["bookmark", "set", "main"]);
-    let (_, stderr) =
-        test_env.jj_cmd_ok(&workspace_root, &["git", "push", "-b=main", "-b=bookmark1"]);
+    let (_, stderr) = test_env.jj_cmd_ok(
+        &workspace_root,
+        &["git", "push", "--allow-new", "-b=main", "-b=bookmark1"],
+    );
     insta::assert_snapshot!(stderr, @r#"
     Changes to push to origin:
       Move forward bookmark main from 7eb97bf230ad to fbb352762352
@@ -223,7 +241,10 @@ fn test_git_private_commits_already_on_the_remote_do_not_block_push() {
         &["new", "description('private 1')", "-m=public 4"],
     );
     test_env.jj_cmd_ok(&workspace_root, &["bookmark", "create", "bookmark2"]);
-    let (_, stderr) = test_env.jj_cmd_ok(&workspace_root, &["git", "push", "-b=bookmark2"]);
+    let (_, stderr) = test_env.jj_cmd_ok(
+        &workspace_root,
+        &["git", "push", "--allow-new", "-b=bookmark2"],
+    );
     insta::assert_snapshot!(stderr, @r#"
     Changes to push to origin:
       Add bookmark bookmark2 to ee5b808b0b95
@@ -255,7 +276,9 @@ fn test_git_private_commits_are_evaluated_separately_for_each_remote() {
         &workspace_root,
         &["git", "push", "--remote=other", "-b=main"],
     );
-    insta::assert_snapshot!(stderr, @r###"
+    insta::assert_snapshot!(stderr, @r"
     Error: Won't push commit 36b7ecd11ad9 since it is private
-    "###);
+    Hint: Rejected commit: znkkpsqq 36b7ecd1 (empty) private 1
+    Hint: Configured git.private-commits: 'description(glob:'private*')'
+    ");
 }

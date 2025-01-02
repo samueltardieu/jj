@@ -16,7 +16,9 @@ use std::borrow::Cow;
 use std::cmp;
 use std::io;
 
+use bstr::ByteSlice as _;
 use unicode_width::UnicodeWidthChar as _;
+use unicode_width::UnicodeWidthStr as _;
 
 use crate::formatter::FormatRecorder;
 use crate::formatter::Formatter;
@@ -66,21 +68,94 @@ pub fn elide_start<'a>(
     (Cow::Owned([ellipsis, text].concat()), concat_width)
 }
 
+/// Shortens `text` to `max_width` by removing trailing characters. `ellipsis`
+/// is added if the `text` gets truncated.
+///
+/// The returned string (including `ellipsis`) never exceeds the `max_width`.
+pub fn elide_end<'a>(text: &'a str, ellipsis: &'a str, max_width: usize) -> (Cow<'a, str>, usize) {
+    let (text_end, text_width) = truncate_end_pos(text, max_width);
+    if text_end == text.len() {
+        return (Cow::Borrowed(text), text_width);
+    }
+
+    let (ellipsis_end, ellipsis_width) = truncate_end_pos(ellipsis, max_width);
+    if ellipsis_end != ellipsis.len() {
+        let ellipsis = &ellipsis[..ellipsis_end];
+        return (Cow::Borrowed(ellipsis), ellipsis_width);
+    }
+
+    let text = &text[..text_end];
+    let max_text_width = max_width - ellipsis_width;
+    let (skip, skipped_width) = skip_end_pos(text, text_width.saturating_sub(max_text_width));
+    let text = &text[..skip];
+    let concat_width = (text_width - skipped_width) + ellipsis_width;
+    assert!(concat_width <= max_width);
+    (Cow::Owned([text, ellipsis].concat()), concat_width)
+}
+
 /// Shortens `text` to `max_width` by removing leading characters, returning
 /// `(start_index, width)`.
 ///
 /// The truncated string may have 0-width decomposed characters at start.
 fn truncate_start_pos(text: &str, max_width: usize) -> (usize, usize) {
+    truncate_start_pos_with_indices(
+        text.char_indices()
+            .rev()
+            .map(|(start, c)| (start + c.len_utf8(), c)),
+        max_width,
+    )
+}
+
+fn truncate_start_pos_bytes(text: &[u8], max_width: usize) -> (usize, usize) {
+    truncate_start_pos_with_indices(
+        text.char_indices().rev().map(|(_, end, c)| (end, c)),
+        max_width,
+    )
+}
+
+fn truncate_start_pos_with_indices(
+    char_indices_rev: impl Iterator<Item = (usize, char)>,
+    max_width: usize,
+) -> (usize, usize) {
     let mut acc_width = 0;
-    for (i, c) in text.char_indices().rev() {
+    for (end, c) in char_indices_rev {
         let new_width = acc_width + c.width().unwrap_or(0);
         if new_width > max_width {
-            let prev_index = i + c.len_utf8();
-            return (prev_index, acc_width);
+            return (end, acc_width);
         }
         acc_width = new_width;
     }
     (0, acc_width)
+}
+
+/// Shortens `text` to `max_width` by removing trailing characters, returning
+/// `(end_index, width)`.
+fn truncate_end_pos(text: &str, max_width: usize) -> (usize, usize) {
+    truncate_end_pos_with_indices(text.char_indices(), text.len(), max_width)
+}
+
+fn truncate_end_pos_bytes(text: &[u8], max_width: usize) -> (usize, usize) {
+    truncate_end_pos_with_indices(
+        text.char_indices().map(|(start, _, c)| (start, c)),
+        text.len(),
+        max_width,
+    )
+}
+
+fn truncate_end_pos_with_indices(
+    char_indices_fwd: impl Iterator<Item = (usize, char)>,
+    text_len: usize,
+    max_width: usize,
+) -> (usize, usize) {
+    let mut acc_width = 0;
+    for (start, c) in char_indices_fwd {
+        let new_width = acc_width + c.width().unwrap_or(0);
+        if new_width > max_width {
+            return (start, acc_width);
+        }
+        acc_width = new_width;
+    }
+    (text_len, acc_width)
 }
 
 /// Skips `width` leading characters, returning `(start_index, skipped_width)`.
@@ -90,19 +165,161 @@ fn truncate_start_pos(text: &str, max_width: usize) -> (usize, usize) {
 ///
 /// The truncated string may have 0-width decomposed characters at start.
 fn skip_start_pos(text: &str, width: usize) -> (usize, usize) {
+    skip_start_pos_with_indices(text.char_indices(), text.len(), width)
+}
+
+fn skip_start_pos_with_indices(
+    char_indices_fwd: impl Iterator<Item = (usize, char)>,
+    text_len: usize,
+    width: usize,
+) -> (usize, usize) {
     let mut acc_width = 0;
-    for (i, c) in text.char_indices() {
+    for (start, c) in char_indices_fwd {
         if acc_width >= width {
-            return (i, acc_width);
+            return (start, acc_width);
         }
         acc_width += c.width().unwrap_or(0);
     }
-    (text.len(), acc_width)
+    (text_len, acc_width)
+}
+
+/// Skips `width` trailing characters, returning `(end_index, skipped_width)`.
+///
+/// The `skipped_width` may exceed the given `width` if `width` is not at
+/// character boundary.
+fn skip_end_pos(text: &str, width: usize) -> (usize, usize) {
+    skip_end_pos_with_indices(
+        text.char_indices()
+            .rev()
+            .map(|(start, c)| (start + c.len_utf8(), c)),
+        width,
+    )
+}
+
+fn skip_end_pos_with_indices(
+    char_indices_rev: impl Iterator<Item = (usize, char)>,
+    width: usize,
+) -> (usize, usize) {
+    let mut acc_width = 0;
+    for (end, c) in char_indices_rev {
+        if acc_width >= width {
+            return (end, acc_width);
+        }
+        acc_width += c.width().unwrap_or(0);
+    }
+    (0, acc_width)
 }
 
 /// Removes leading 0-width characters.
 fn trim_start_zero_width_chars(text: &str) -> &str {
     text.trim_start_matches(|c: char| c.width().unwrap_or(0) == 0)
+}
+
+/// Returns bytes length of leading 0-width characters.
+fn count_start_zero_width_chars_bytes(text: &[u8]) -> usize {
+    text.char_indices()
+        .find(|(_, _, c)| c.width().unwrap_or(0) != 0)
+        .map(|(start, _, _)| start)
+        .unwrap_or(text.len())
+}
+
+/// Writes text truncated to `max_width` by removing leading characters. Returns
+/// width of the truncated text, which may be shorter than `max_width`.
+///
+/// The input `recorded_content` should be a single-line text.
+pub fn write_truncated_start(
+    formatter: &mut dyn Formatter,
+    recorded_content: &FormatRecorder,
+    max_width: usize,
+) -> io::Result<usize> {
+    let data = recorded_content.data();
+    let (start, truncated_width) = truncate_start_pos_bytes(data, max_width);
+    let truncated_start = start + count_start_zero_width_chars_bytes(&data[start..]);
+    recorded_content.replay_with(formatter, |formatter, range| {
+        let start = cmp::max(range.start, truncated_start);
+        if start < range.end {
+            formatter.write_all(&data[start..range.end])?;
+        }
+        Ok(())
+    })?;
+    Ok(truncated_width)
+}
+
+/// Writes text truncated to `max_width` by removing trailing characters.
+/// Returns width of the truncated text, which may be shorter than `max_width`.
+///
+/// The input `recorded_content` should be a single-line text.
+pub fn write_truncated_end(
+    formatter: &mut dyn Formatter,
+    recorded_content: &FormatRecorder,
+    max_width: usize,
+) -> io::Result<usize> {
+    let data = recorded_content.data();
+    let (truncated_end, truncated_width) = truncate_end_pos_bytes(data, max_width);
+    recorded_content.replay_with(formatter, |formatter, range| {
+        let end = cmp::min(range.end, truncated_end);
+        if range.start < end {
+            formatter.write_all(&data[range.start..end])?;
+        }
+        Ok(())
+    })?;
+    Ok(truncated_width)
+}
+
+/// Writes text padded to `min_width` by adding leading fill characters.
+///
+/// The input `recorded_content` should be a single-line text. The
+/// `recorded_fill_char` should be bytes of 1-width character.
+pub fn write_padded_start(
+    formatter: &mut dyn Formatter,
+    recorded_content: &FormatRecorder,
+    recorded_fill_char: &FormatRecorder,
+    min_width: usize,
+) -> io::Result<()> {
+    // We don't care about the width of non-UTF-8 bytes, but should not panic.
+    let width = String::from_utf8_lossy(recorded_content.data()).width();
+    let fill_width = min_width.saturating_sub(width);
+    write_padding(formatter, recorded_fill_char, fill_width)?;
+    recorded_content.replay(formatter)?;
+    Ok(())
+}
+
+/// Writes text padded to `min_width` by adding leading fill characters.
+///
+/// The input `recorded_content` should be a single-line text. The
+/// `recorded_fill_char` should be bytes of 1-width character.
+pub fn write_padded_end(
+    formatter: &mut dyn Formatter,
+    recorded_content: &FormatRecorder,
+    recorded_fill_char: &FormatRecorder,
+    min_width: usize,
+) -> io::Result<()> {
+    // We don't care about the width of non-UTF-8 bytes, but should not panic.
+    let width = String::from_utf8_lossy(recorded_content.data()).width();
+    let fill_width = min_width.saturating_sub(width);
+    recorded_content.replay(formatter)?;
+    write_padding(formatter, recorded_fill_char, fill_width)?;
+    Ok(())
+}
+
+fn write_padding(
+    formatter: &mut dyn Formatter,
+    recorded_fill_char: &FormatRecorder,
+    fill_width: usize,
+) -> io::Result<()> {
+    if fill_width == 0 {
+        return Ok(());
+    }
+    let data = recorded_fill_char.data();
+    recorded_fill_char.replay_with(formatter, |formatter, range| {
+        // Don't emit labels repeatedly, just repeat content. Suppose fill char
+        // is a single character, the byte sequence shouldn't be broken up to
+        // multiple labeled regions.
+        for _ in 0..fill_width {
+            formatter.write_all(&data[range.clone()])?;
+        }
+        Ok(())
+    })
 }
 
 /// Indents each line by the given prefix preserving labels.
@@ -271,18 +488,27 @@ pub fn parse_author(author: &str) -> Result<(String, String), &'static str> {
 mod tests {
     use std::io::Write as _;
 
+    use indoc::indoc;
+    use jj_lib::config::ConfigLayer;
+    use jj_lib::config::ConfigSource;
+    use jj_lib::config::StackedConfig;
+
     use super::*;
     use crate::formatter::ColorFormatter;
     use crate::formatter::PlainTextFormatter;
 
     fn format_colored(write: impl FnOnce(&mut dyn Formatter) -> io::Result<()>) -> String {
-        let config = config::Config::builder()
-            .set_override("colors.cyan", "cyan")
-            .unwrap()
-            .set_override("colors.red", "red")
-            .unwrap()
-            .build()
-            .unwrap();
+        let mut config = StackedConfig::empty();
+        config.add_layer(
+            ConfigLayer::parse(
+                ConfigSource::Default,
+                indoc! {"
+                    colors.cyan = 'cyan'
+                    colors.red = 'red'
+                "},
+            )
+            .unwrap(),
+        );
         let mut output = Vec::new();
         let mut formatter = ColorFormatter::for_config(&mut output, &config, false).unwrap();
         write(&mut formatter).unwrap();
@@ -367,6 +593,328 @@ mod tests {
         assert_eq!(
             elide_start("a\u{300}bcde\u{300}", "A\u{300}CE\u{300}", 2),
             ("CE\u{300}".into(), 2)
+        );
+    }
+
+    #[test]
+    fn test_elide_end() {
+        // Empty string
+        assert_eq!(elide_end("", "", 1), ("".into(), 0));
+
+        // Basic truncation
+        assert_eq!(elide_end("abcdef", "", 6), ("abcdef".into(), 6));
+        assert_eq!(elide_end("abcdef", "", 5), ("abcde".into(), 5));
+        assert_eq!(elide_end("abcdef", "", 1), ("a".into(), 1));
+        assert_eq!(elide_end("abcdef", "", 0), ("".into(), 0));
+        assert_eq!(elide_end("abcdef", "-=~", 6), ("abcdef".into(), 6));
+        assert_eq!(elide_end("abcdef", "-=~", 5), ("ab-=~".into(), 5));
+        assert_eq!(elide_end("abcdef", "-=~", 4), ("a-=~".into(), 4));
+        assert_eq!(elide_end("abcdef", "-=~", 3), ("-=~".into(), 3));
+        assert_eq!(elide_end("abcdef", "-=~", 2), ("-=".into(), 2));
+        assert_eq!(elide_end("abcdef", "-=~", 1), ("-".into(), 1));
+        assert_eq!(elide_end("abcdef", "-=~", 0), ("".into(), 0));
+
+        // East Asian characters (char.width() == 2)
+        assert_eq!(elide_end("一二三", "", 6), ("一二三".into(), 6));
+        assert_eq!(elide_end("一二三", "", 5), ("一二".into(), 4));
+        assert_eq!(elide_end("一二三", "", 4), ("一二".into(), 4));
+        assert_eq!(elide_end("一二三", "", 1), ("".into(), 0));
+        assert_eq!(elide_end("一二三", "-=~", 6), ("一二三".into(), 6));
+        assert_eq!(elide_end("一二三", "-=~", 5), ("一-=~".into(), 5));
+        assert_eq!(elide_end("一二三", "-=~", 4), ("-=~".into(), 3));
+        assert_eq!(elide_end("一二三", "略", 6), ("一二三".into(), 6));
+        assert_eq!(elide_end("一二三", "略", 5), ("一略".into(), 4));
+        assert_eq!(elide_end("一二三", "略", 4), ("一略".into(), 4));
+        assert_eq!(elide_end("一二三", "略", 2), ("略".into(), 2));
+        assert_eq!(elide_end("一二三", "略", 1), ("".into(), 0));
+        assert_eq!(elide_end("一二三", ".", 5), ("一二.".into(), 5));
+        assert_eq!(elide_end("一二三", ".", 4), ("一.".into(), 3));
+        assert_eq!(elide_end("一二三", "略.", 5), ("一略.".into(), 5));
+        assert_eq!(elide_end("一二三", "略.", 4), ("略.".into(), 3));
+
+        // Multi-byte character at boundary
+        assert_eq!(elide_end("àbcdè", "", 5), ("àbcdè".into(), 5));
+        assert_eq!(elide_end("àbcdè", "", 4), ("àbcd".into(), 4));
+        assert_eq!(elide_end("àbcdè", "", 1), ("à".into(), 1));
+        assert_eq!(elide_end("àbcdè", "", 0), ("".into(), 0));
+        assert_eq!(elide_end("àbcdè", "ÀÇÈ", 4), ("àÀÇÈ".into(), 4));
+        assert_eq!(elide_end("àbcdè", "ÀÇÈ", 3), ("ÀÇÈ".into(), 3));
+        assert_eq!(elide_end("àbcdè", "ÀÇÈ", 2), ("ÀÇ".into(), 2));
+
+        // Decomposed character at boundary
+        assert_eq!(
+            elide_end("a\u{300}bcde\u{300}", "", 5),
+            ("a\u{300}bcde\u{300}".into(), 5)
+        );
+        assert_eq!(
+            elide_end("a\u{300}bcde\u{300}", "", 4),
+            ("a\u{300}bcd".into(), 4)
+        );
+        assert_eq!(
+            elide_end("a\u{300}bcde\u{300}", "", 1),
+            ("a\u{300}".into(), 1)
+        );
+        assert_eq!(elide_end("a\u{300}bcde\u{300}", "", 0), ("".into(), 0));
+        assert_eq!(
+            elide_end("a\u{300}bcde\u{300}", "A\u{300}CE\u{300}", 4),
+            ("a\u{300}A\u{300}CE\u{300}".into(), 4)
+        );
+        assert_eq!(
+            elide_end("a\u{300}bcde\u{300}", "A\u{300}CE\u{300}", 3),
+            ("A\u{300}CE\u{300}".into(), 3)
+        );
+        assert_eq!(
+            elide_end("a\u{300}bcde\u{300}", "A\u{300}CE\u{300}", 2),
+            ("A\u{300}C".into(), 2)
+        );
+    }
+
+    #[test]
+    fn test_write_truncated_labeled() {
+        let mut recorder = FormatRecorder::new();
+        for (label, word) in [("red", "foo"), ("cyan", "bar")] {
+            recorder.push_label(label).unwrap();
+            write!(recorder, "{word}").unwrap();
+            recorder.pop_label().unwrap();
+        }
+
+        // Truncate start
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_start(formatter, &recorder, 6).map(|_| ())),
+            @"[38;5;1mfoo[39m[38;5;6mbar[39m"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_start(formatter, &recorder, 5).map(|_| ())),
+            @"[38;5;1moo[39m[38;5;6mbar[39m"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_start(formatter, &recorder, 3).map(|_| ())),
+            @"[38;5;6mbar[39m"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_start(formatter, &recorder, 2).map(|_| ())),
+            @"[38;5;6mar[39m"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_start(formatter, &recorder, 0).map(|_| ())),
+            @""
+        );
+
+        // Truncate end
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_end(formatter, &recorder, 6).map(|_| ())),
+            @"[38;5;1mfoo[39m[38;5;6mbar[39m"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_end(formatter, &recorder, 5).map(|_| ())),
+            @"[38;5;1mfoo[39m[38;5;6mba[39m"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_end(formatter, &recorder, 3).map(|_| ())),
+            @"[38;5;1mfoo[39m"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_end(formatter, &recorder, 2).map(|_| ())),
+            @"[38;5;1mfo[39m"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_end(formatter, &recorder, 0).map(|_| ())),
+            @""
+        );
+    }
+
+    #[test]
+    fn test_write_truncated_non_ascii_chars() {
+        let mut recorder = FormatRecorder::new();
+        write!(recorder, "a\u{300}bc\u{300}一二三").unwrap();
+
+        // Truncate start
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_start(formatter, &recorder, 1).map(|_| ())),
+            @""
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_start(formatter, &recorder, 2).map(|_| ())),
+            @"三"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_start(formatter, &recorder, 3).map(|_| ())),
+            @"三"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_start(formatter, &recorder, 6).map(|_| ())),
+            @"一二三"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_start(formatter, &recorder, 7).map(|_| ())),
+            @"c̀一二三"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_start(formatter, &recorder, 9).map(|_| ())),
+            @"àbc̀一二三"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_start(formatter, &recorder, 10).map(|_| ())),
+            @"àbc̀一二三"
+        );
+
+        // Truncate end
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_end(formatter, &recorder, 1).map(|_| ())),
+            @"à"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_end(formatter, &recorder, 4).map(|_| ())),
+            @"àbc̀"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_end(formatter, &recorder, 5).map(|_| ())),
+            @"àbc̀一"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_end(formatter, &recorder, 9).map(|_| ())),
+            @"àbc̀一二三"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_end(formatter, &recorder, 10).map(|_| ())),
+            @"àbc̀一二三"
+        );
+    }
+
+    #[test]
+    fn test_write_truncated_empty_content() {
+        let recorder = FormatRecorder::new();
+
+        // Truncate start
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_start(formatter, &recorder, 0).map(|_| ())),
+            @""
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_start(formatter, &recorder, 1).map(|_| ())),
+            @""
+        );
+
+        // Truncate end
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_end(formatter, &recorder, 0).map(|_| ())),
+            @""
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_truncated_end(formatter, &recorder, 1).map(|_| ())),
+            @""
+        );
+    }
+
+    #[test]
+    fn test_write_padded_labeled_content() {
+        let mut recorder = FormatRecorder::new();
+        for (label, word) in [("red", "foo"), ("cyan", "bar")] {
+            recorder.push_label(label).unwrap();
+            write!(recorder, "{word}").unwrap();
+            recorder.pop_label().unwrap();
+        }
+        let fill = FormatRecorder::with_data("=");
+
+        // Pad start
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_padded_start(formatter, &recorder, &fill, 6)),
+            @"[38;5;1mfoo[39m[38;5;6mbar[39m"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_padded_start(formatter, &recorder, &fill, 7)),
+            @"=[38;5;1mfoo[39m[38;5;6mbar[39m"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_padded_start(formatter, &recorder, &fill, 8)),
+            @"==[38;5;1mfoo[39m[38;5;6mbar[39m"
+        );
+
+        // Pad end
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_padded_end(formatter, &recorder, &fill, 6)),
+            @"[38;5;1mfoo[39m[38;5;6mbar[39m"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_padded_end(formatter, &recorder, &fill, 7)),
+            @"[38;5;1mfoo[39m[38;5;6mbar[39m="
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_padded_end(formatter, &recorder, &fill, 8)),
+            @"[38;5;1mfoo[39m[38;5;6mbar[39m=="
+        );
+    }
+
+    #[test]
+    fn test_write_padded_labeled_fill_char() {
+        let recorder = FormatRecorder::with_data("foo");
+        let mut fill = FormatRecorder::new();
+        fill.push_label("red").unwrap();
+        write!(fill, "=").unwrap();
+        fill.pop_label().unwrap();
+
+        // Pad start
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_padded_start(formatter, &recorder, &fill, 5)),
+            @"[38;5;1m==[39mfoo"
+        );
+
+        // Pad end
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_padded_end(formatter, &recorder, &fill, 6)),
+            @"foo[38;5;1m===[39m"
+        );
+    }
+
+    #[test]
+    fn test_write_padded_non_ascii_chars() {
+        let recorder = FormatRecorder::with_data("a\u{300}bc\u{300}一二三");
+        let fill = FormatRecorder::with_data("=");
+
+        // Pad start
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_padded_start(formatter, &recorder, &fill, 9)),
+            @"àbc̀一二三"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_padded_start(formatter, &recorder, &fill, 10)),
+            @"=àbc̀一二三"
+        );
+
+        // Pad end
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_padded_end(formatter, &recorder, &fill, 9)),
+            @"àbc̀一二三"
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_padded_end(formatter, &recorder, &fill, 10)),
+            @"àbc̀一二三="
+        );
+    }
+
+    #[test]
+    fn test_write_padded_empty_content() {
+        let recorder = FormatRecorder::new();
+        let fill = FormatRecorder::with_data("=");
+
+        // Pad start
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_padded_start(formatter, &recorder, &fill, 0)),
+            @""
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_padded_start(formatter, &recorder, &fill, 1)),
+            @"="
+        );
+
+        // Pad end
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_padded_end(formatter, &recorder, &fill, 0)),
+            @""
+        );
+        insta::assert_snapshot!(
+            format_colored(|formatter| write_padded_end(formatter, &recorder, &fill, 1)),
+            @"="
         );
     }
 

@@ -13,8 +13,8 @@ Redesign Sparse Patterns to accommodate more advanced features for native
 and custom implementations. This includes three main goals:
 
 1.  Sparse Patterns should be versioned with the working copy
-1.  Sparse Patterns should support more [flexible matching rules](https://github.com/martinvonz/jj/issues/1896)
-1.  Sparse Patterns should support [client path remapping](https://github.com/martinvonz/jj/issues/2288)
+1.  Sparse Patterns should support more [flexible matching rules](https://github.com/jj-vcs/jj/issues/1896)
+1.  Sparse Patterns should support [client path remapping](https://github.com/jj-vcs/jj/issues/2288)
 
 ## Current State (as of jj 0.13.0)
 
@@ -180,7 +180,8 @@ form of a `WorkingCopyPatterns` is defined as the form such that:
 
 ### Working Copy Map
 
-WARNING: This section is intentionally lacking, more research is needed.
+!!! warning
+    This section is intentionally lacking, more research is needed.
 
 All `WorkingCopyPatterns` will come equipped with a default no-op mapping.
 These mappings are inspired by and similar to [Perforce client views](https://www.perforce.com/manuals/cmdref/Content/CmdRef/views.html).

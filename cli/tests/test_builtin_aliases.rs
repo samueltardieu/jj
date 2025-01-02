@@ -37,7 +37,7 @@ fn set_up(trunk_name: &str) -> (TestEnvironment, PathBuf) {
         &[
             "git",
             "clone",
-            "--config-toml=git.auto-local-branch=true",
+            "--config=git.auto-local-bookmark=true",
             origin_git_repo_path.to_str().unwrap(),
             "local",
         ],
@@ -151,9 +151,9 @@ fn test_builtin_user_redefines_builtin_immutable_heads() {
     │  (empty) description 1
     ~
     "###);
-    insta::assert_snapshot!(stderr, @r###"
+    insta::assert_snapshot!(stderr, @r"
     Warning: Redefining `revset-aliases.builtin_immutable_heads()` is not recommended; redefine `immutable_heads()` instead
-    Warning: Redefining `revset-aliases.immutable()` is not recommended; redefine `immutable_heads()` instead
     Warning: Redefining `revset-aliases.mutable()` is not recommended; redefine `immutable_heads()` instead
-    "###);
+    Warning: Redefining `revset-aliases.immutable()` is not recommended; redefine `immutable_heads()` instead
+    ");
 }

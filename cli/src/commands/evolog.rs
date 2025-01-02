@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use clap_complete::ArgValueCandidates;
 use itertools::Itertools;
 use jj_lib::commit::Commit;
 use jj_lib::dag_walk::topo_order_reverse_ok;
@@ -25,6 +26,7 @@ use crate::cli_util::LogContentFormat;
 use crate::cli_util::RevisionArg;
 use crate::command_error::CommandError;
 use crate::commit_templater::CommitTemplateLanguage;
+use crate::complete;
 use crate::diff_util::DiffFormatArgs;
 use crate::graphlog::get_graphlog;
 use crate::graphlog::Edge;
@@ -37,7 +39,12 @@ use crate::ui::Ui;
 /// of a change evolves when the change is updated, rebased, etc.
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct EvologArgs {
-    #[arg(long, short, default_value = "@")]
+    #[arg(
+        long, short,
+        default_value = "@",
+        value_name = "REVSET",
+        add = ArgValueCandidates::new(complete::all_revisions),
+    )]
     revision: RevisionArg,
     /// Limit number of revisions to show
     #[arg(long, short = 'n')]
@@ -55,7 +62,7 @@ pub(crate) struct EvologArgs {
     no_graph: bool,
     /// Render each revision using the given template
     ///
-    /// For the syntax, see https://martinvonz.github.io/jj/latest/templates/
+    /// For the syntax, see https://jj-vcs.github.io/jj/latest/templates/
     #[arg(long, short = 'T')]
     template: Option<String>,
     /// Show patch compared to the previous version of this change
@@ -89,7 +96,7 @@ pub(crate) fn cmd_evolog(
         let language = workspace_command.commit_template_language();
         let template_string = match &args.template {
             Some(value) => value.to_string(),
-            None => command.settings().config().get_string("templates.log")?,
+            None => command.settings().get_string("templates.log")?,
         };
         template = workspace_command
             .parse_template(

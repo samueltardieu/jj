@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use clap_complete::ArgValueCandidates;
 use indexmap::IndexSet;
 use itertools::Itertools;
 use jj_lib::backend::CommitId;
@@ -24,6 +25,7 @@ use tracing::instrument;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
 use crate::command_error::CommandError;
+use crate::complete;
 use crate::ui::Ui;
 
 /// Parallelize revisions by making them siblings
@@ -55,6 +57,10 @@ use crate::ui::Ui;
 #[command(verbatim_doc_comment)]
 pub(crate) struct ParallelizeArgs {
     /// Revisions to parallelize
+    #[arg(
+        value_name = "REVSETS",
+        add = ArgValueCandidates::new(complete::mutable_revisions)
+    )]
     revisions: Vec<RevisionArg>,
 }
 
@@ -107,7 +113,6 @@ pub(crate) fn cmd_parallelize(
     }
 
     tx.repo_mut().transform_descendants(
-        command.settings(),
         target_commits.iter().ids().cloned().collect_vec(),
         |mut rewriter| {
             // Commits in the target set do not depend on each other but they still depend
@@ -131,7 +136,7 @@ pub(crate) fn cmd_parallelize(
                 rewriter.set_new_rewritten_parents(&new_parents);
             }
             if rewriter.parents_changed() {
-                let builder = rewriter.rebase(command.settings())?;
+                let builder = rewriter.rebase()?;
                 builder.write()?;
             }
             Ok(())

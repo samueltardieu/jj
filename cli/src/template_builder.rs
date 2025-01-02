@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::io;
 
 use itertools::Itertools as _;
 use jj_lib::backend::Signature;
@@ -20,6 +22,8 @@ use jj_lib::backend::Timestamp;
 use jj_lib::dsl_util::AliasExpandError as _;
 use jj_lib::time_util::DatePattern;
 
+use crate::formatter::FormatRecorder;
+use crate::formatter::Formatter;
 use crate::template_parser;
 use crate::template_parser::BinaryOp;
 use crate::template_parser::ExpressionKind;
@@ -34,6 +38,7 @@ use crate::template_parser::UnaryOp;
 use crate::templater::CoalesceTemplate;
 use crate::templater::ConcatTemplate;
 use crate::templater::ConditionalTemplate;
+use crate::templater::Email;
 use crate::templater::LabelTemplate;
 use crate::templater::ListPropertyTemplate;
 use crate::templater::ListTemplate;
@@ -67,6 +72,7 @@ pub trait TemplateLanguage<'a> {
         property: impl TemplateProperty<Output = Option<i64>> + 'a,
     ) -> Self::Property;
     fn wrap_signature(property: impl TemplateProperty<Output = Signature> + 'a) -> Self::Property;
+    fn wrap_email(property: impl TemplateProperty<Output = Email> + 'a) -> Self::Property;
     fn wrap_size_hint(property: impl TemplateProperty<Output = SizeHint> + 'a) -> Self::Property;
     fn wrap_timestamp(property: impl TemplateProperty<Output = Timestamp> + 'a) -> Self::Property;
     fn wrap_timestamp_range(
@@ -113,6 +119,7 @@ macro_rules! impl_core_wrap_property_fns {
                 wrap_integer(i64) => Integer,
                 wrap_integer_opt(Option<i64>) => IntegerOpt,
                 wrap_signature(jj_lib::backend::Signature) => Signature,
+                wrap_email($crate::templater::Email) => Email,
                 wrap_size_hint($crate::templater::SizeHint) => SizeHint,
                 wrap_timestamp(jj_lib::backend::Timestamp) => Timestamp,
                 wrap_timestamp_range($crate::templater::TimestampRange) => TimestampRange,
@@ -159,6 +166,13 @@ pub trait IntoTemplateProperty<'a> {
 
     fn try_into_plain_text(self) -> Option<Box<dyn TemplateProperty<Output = String> + 'a>>;
     fn try_into_template(self) -> Option<Box<dyn Template + 'a>>;
+
+    /// Transforms into a property that will evaluate to `self == other`.
+    fn try_into_eq(self, other: Self) -> Option<Box<dyn TemplateProperty<Output = bool> + 'a>>;
+
+    /// Transforms into a property that will evaluate to an [`Ordering`].
+    fn try_into_cmp(self, other: Self)
+        -> Option<Box<dyn TemplateProperty<Output = Ordering> + 'a>>;
 }
 
 pub enum CoreTemplatePropertyKind<'a> {
@@ -168,6 +182,7 @@ pub enum CoreTemplatePropertyKind<'a> {
     Integer(Box<dyn TemplateProperty<Output = i64> + 'a>),
     IntegerOpt(Box<dyn TemplateProperty<Output = Option<i64>> + 'a>),
     Signature(Box<dyn TemplateProperty<Output = Signature> + 'a>),
+    Email(Box<dyn TemplateProperty<Output = Email> + 'a>),
     SizeHint(Box<dyn TemplateProperty<Output = SizeHint> + 'a>),
     Timestamp(Box<dyn TemplateProperty<Output = Timestamp> + 'a>),
     TimestampRange(Box<dyn TemplateProperty<Output = TimestampRange> + 'a>),
@@ -195,6 +210,7 @@ impl<'a> IntoTemplateProperty<'a> for CoreTemplatePropertyKind<'a> {
             CoreTemplatePropertyKind::Integer(_) => "Integer",
             CoreTemplatePropertyKind::IntegerOpt(_) => "Option<Integer>",
             CoreTemplatePropertyKind::Signature(_) => "Signature",
+            CoreTemplatePropertyKind::Email(_) => "Email",
             CoreTemplatePropertyKind::SizeHint(_) => "SizeHint",
             CoreTemplatePropertyKind::Timestamp(_) => "Timestamp",
             CoreTemplatePropertyKind::TimestampRange(_) => "TimestampRange",
@@ -217,6 +233,9 @@ impl<'a> IntoTemplateProperty<'a> for CoreTemplatePropertyKind<'a> {
                 Some(Box::new(property.map(|opt| opt.is_some())))
             }
             CoreTemplatePropertyKind::Signature(_) => None,
+            CoreTemplatePropertyKind::Email(property) => {
+                Some(Box::new(property.map(|e| !e.0.is_empty())))
+            }
             CoreTemplatePropertyKind::SizeHint(_) => None,
             CoreTemplatePropertyKind::Timestamp(_) => None,
             CoreTemplatePropertyKind::TimestampRange(_) => None,
@@ -256,11 +275,70 @@ impl<'a> IntoTemplateProperty<'a> for CoreTemplatePropertyKind<'a> {
             CoreTemplatePropertyKind::Integer(property) => Some(property.into_template()),
             CoreTemplatePropertyKind::IntegerOpt(property) => Some(property.into_template()),
             CoreTemplatePropertyKind::Signature(property) => Some(property.into_template()),
+            CoreTemplatePropertyKind::Email(property) => Some(property.into_template()),
             CoreTemplatePropertyKind::SizeHint(_) => None,
             CoreTemplatePropertyKind::Timestamp(property) => Some(property.into_template()),
             CoreTemplatePropertyKind::TimestampRange(property) => Some(property.into_template()),
             CoreTemplatePropertyKind::Template(template) => Some(template),
             CoreTemplatePropertyKind::ListTemplate(template) => Some(template.into_template()),
+        }
+    }
+
+    fn try_into_eq(self, other: Self) -> Option<Box<dyn TemplateProperty<Output = bool> + 'a>> {
+        match (self, other) {
+            (CoreTemplatePropertyKind::String(lhs), CoreTemplatePropertyKind::String(rhs)) => {
+                Some(Box::new((lhs, rhs).map(|(l, r)| l == r)))
+            }
+            (CoreTemplatePropertyKind::String(lhs), CoreTemplatePropertyKind::Email(rhs)) => {
+                Some(Box::new((lhs, rhs).map(|(l, r)| l == r.0)))
+            }
+            (CoreTemplatePropertyKind::Boolean(lhs), CoreTemplatePropertyKind::Boolean(rhs)) => {
+                Some(Box::new((lhs, rhs).map(|(l, r)| l == r)))
+            }
+            (CoreTemplatePropertyKind::Integer(lhs), CoreTemplatePropertyKind::Integer(rhs)) => {
+                Some(Box::new((lhs, rhs).map(|(l, r)| l == r)))
+            }
+            (CoreTemplatePropertyKind::Email(lhs), CoreTemplatePropertyKind::Email(rhs)) => {
+                Some(Box::new((lhs, rhs).map(|(l, r)| l == r)))
+            }
+            (CoreTemplatePropertyKind::Email(lhs), CoreTemplatePropertyKind::String(rhs)) => {
+                Some(Box::new((lhs, rhs).map(|(l, r)| l.0 == r)))
+            }
+            (CoreTemplatePropertyKind::String(_), _) => None,
+            (CoreTemplatePropertyKind::StringList(_), _) => None,
+            (CoreTemplatePropertyKind::Boolean(_), _) => None,
+            (CoreTemplatePropertyKind::Integer(_), _) => None,
+            (CoreTemplatePropertyKind::IntegerOpt(_), _) => None,
+            (CoreTemplatePropertyKind::Signature(_), _) => None,
+            (CoreTemplatePropertyKind::Email(_), _) => None,
+            (CoreTemplatePropertyKind::SizeHint(_), _) => None,
+            (CoreTemplatePropertyKind::Timestamp(_), _) => None,
+            (CoreTemplatePropertyKind::TimestampRange(_), _) => None,
+            (CoreTemplatePropertyKind::Template(_), _) => None,
+            (CoreTemplatePropertyKind::ListTemplate(_), _) => None,
+        }
+    }
+
+    fn try_into_cmp(
+        self,
+        other: Self,
+    ) -> Option<Box<dyn TemplateProperty<Output = Ordering> + 'a>> {
+        match (self, other) {
+            (CoreTemplatePropertyKind::Integer(lhs), CoreTemplatePropertyKind::Integer(rhs)) => {
+                Some(Box::new((lhs, rhs).map(|(l, r)| l.cmp(&r))))
+            }
+            (CoreTemplatePropertyKind::String(_), _) => None,
+            (CoreTemplatePropertyKind::StringList(_), _) => None,
+            (CoreTemplatePropertyKind::Boolean(_), _) => None,
+            (CoreTemplatePropertyKind::Integer(_), _) => None,
+            (CoreTemplatePropertyKind::IntegerOpt(_), _) => None,
+            (CoreTemplatePropertyKind::Signature(_), _) => None,
+            (CoreTemplatePropertyKind::Email(_), _) => None,
+            (CoreTemplatePropertyKind::SizeHint(_), _) => None,
+            (CoreTemplatePropertyKind::Timestamp(_), _) => None,
+            (CoreTemplatePropertyKind::TimestampRange(_), _) => None,
+            (CoreTemplatePropertyKind::Template(_), _) => None,
+            (CoreTemplatePropertyKind::ListTemplate(_), _) => None,
         }
     }
 }
@@ -302,6 +380,7 @@ pub struct CoreTemplateBuildFnTable<'a, L: TemplateLanguage<'a> + ?Sized> {
     pub string_methods: TemplateBuildMethodFnMap<'a, L, String>,
     pub boolean_methods: TemplateBuildMethodFnMap<'a, L, bool>,
     pub integer_methods: TemplateBuildMethodFnMap<'a, L, i64>,
+    pub email_methods: TemplateBuildMethodFnMap<'a, L, Email>,
     pub signature_methods: TemplateBuildMethodFnMap<'a, L, Signature>,
     pub size_hint_methods: TemplateBuildMethodFnMap<'a, L, SizeHint>,
     pub timestamp_methods: TemplateBuildMethodFnMap<'a, L, Timestamp>,
@@ -325,6 +404,7 @@ impl<'a, L: TemplateLanguage<'a> + ?Sized> CoreTemplateBuildFnTable<'a, L> {
             boolean_methods: HashMap::new(),
             integer_methods: HashMap::new(),
             signature_methods: builtin_signature_methods(),
+            email_methods: builtin_email_methods(),
             size_hint_methods: builtin_size_hint_methods(),
             timestamp_methods: builtin_timestamp_methods(),
             timestamp_range_methods: builtin_timestamp_range_methods(),
@@ -338,6 +418,7 @@ impl<'a, L: TemplateLanguage<'a> + ?Sized> CoreTemplateBuildFnTable<'a, L> {
             boolean_methods: HashMap::new(),
             integer_methods: HashMap::new(),
             signature_methods: HashMap::new(),
+            email_methods: HashMap::new(),
             size_hint_methods: HashMap::new(),
             timestamp_methods: HashMap::new(),
             timestamp_range_methods: HashMap::new(),
@@ -351,6 +432,7 @@ impl<'a, L: TemplateLanguage<'a> + ?Sized> CoreTemplateBuildFnTable<'a, L> {
             boolean_methods,
             integer_methods,
             signature_methods,
+            email_methods,
             size_hint_methods,
             timestamp_methods,
             timestamp_range_methods,
@@ -361,6 +443,7 @@ impl<'a, L: TemplateLanguage<'a> + ?Sized> CoreTemplateBuildFnTable<'a, L> {
         merge_fn_map(&mut self.boolean_methods, boolean_methods);
         merge_fn_map(&mut self.integer_methods, integer_methods);
         merge_fn_map(&mut self.signature_methods, signature_methods);
+        merge_fn_map(&mut self.email_methods, email_methods);
         merge_fn_map(&mut self.size_hint_methods, size_hint_methods);
         merge_fn_map(&mut self.timestamp_methods, timestamp_methods);
         merge_fn_map(&mut self.timestamp_range_methods, timestamp_range_methods);
@@ -435,6 +518,11 @@ impl<'a, L: TemplateLanguage<'a> + ?Sized> CoreTemplateBuildFnTable<'a, L> {
                 let build = template_parser::lookup_method(type_name, table, function)?;
                 build(language, diagnostics, build_ctx, property, function)
             }
+            CoreTemplatePropertyKind::Email(property) => {
+                let table = &self.email_methods;
+                let build = template_parser::lookup_method(type_name, table, function)?;
+                build(language, diagnostics, build_ctx, property, function)
+            }
             CoreTemplatePropertyKind::SizeHint(property) => {
                 let table = &self.size_hint_methods;
                 let build = template_parser::lookup_method(type_name, table, function)?;
@@ -504,6 +592,17 @@ impl<'a, P: IntoTemplateProperty<'a>> Expression<P> {
         } else {
             Some(Box::new(LabelTemplate::new(template, Literal(self.labels))))
         }
+    }
+
+    pub fn try_into_eq(self, other: Self) -> Option<Box<dyn TemplateProperty<Output = bool> + 'a>> {
+        self.property.try_into_eq(other.property)
+    }
+
+    pub fn try_into_cmp(
+        self,
+        other: Self,
+    ) -> Option<Box<dyn TemplateProperty<Output = Ordering> + 'a>> {
+        self.property.try_into_cmp(other.property)
     }
 }
 
@@ -588,6 +687,7 @@ fn build_binary_operation<'a, L: TemplateLanguage<'a> + ?Sized>(
     op: BinaryOp,
     lhs_node: &ExpressionNode,
     rhs_node: &ExpressionNode,
+    span: pest::Span<'_>,
 ) -> TemplateParseResult<L::Property> {
     match op {
         BinaryOp::LogicalOr => {
@@ -601,6 +701,38 @@ fn build_binary_operation<'a, L: TemplateLanguage<'a> + ?Sized>(
             let rhs = expect_boolean_expression(language, diagnostics, build_ctx, rhs_node)?;
             let out = lhs.and_then(move |l| Ok(l && rhs.extract()?));
             Ok(L::wrap_boolean(out))
+        }
+        BinaryOp::Eq | BinaryOp::Ne => {
+            let lhs = build_expression(language, diagnostics, build_ctx, lhs_node)?;
+            let rhs = build_expression(language, diagnostics, build_ctx, rhs_node)?;
+            let lty = lhs.type_name();
+            let rty = rhs.type_name();
+            let out = lhs.try_into_eq(rhs).ok_or_else(|| {
+                let message = format!(r#"Cannot compare expressions of type "{lty}" and "{rty}""#);
+                TemplateParseError::expression(message, span)
+            })?;
+            match op {
+                BinaryOp::Eq => Ok(L::wrap_boolean(out)),
+                BinaryOp::Ne => Ok(L::wrap_boolean(out.map(|eq| !eq))),
+                _ => unreachable!(),
+            }
+        }
+        BinaryOp::Ge | BinaryOp::Gt | BinaryOp::Le | BinaryOp::Lt => {
+            let lhs = build_expression(language, diagnostics, build_ctx, lhs_node)?;
+            let rhs = build_expression(language, diagnostics, build_ctx, rhs_node)?;
+            let lty = lhs.type_name();
+            let rty = rhs.type_name();
+            let out = lhs.try_into_cmp(rhs).ok_or_else(|| {
+                let message = format!(r#"Cannot compare expressions of type "{lty}" and "{rty}""#);
+                TemplateParseError::expression(message, span)
+            })?;
+            match op {
+                BinaryOp::Ge => Ok(L::wrap_boolean(out.map(|ordering| ordering.is_ge()))),
+                BinaryOp::Gt => Ok(L::wrap_boolean(out.map(|ordering| ordering.is_gt()))),
+                BinaryOp::Le => Ok(L::wrap_boolean(out.map(|ordering| ordering.is_le()))),
+                BinaryOp::Lt => Ok(L::wrap_boolean(out.map(|ordering| ordering.is_lt()))),
+                _ => unreachable!(),
+            }
         }
     }
 }
@@ -769,14 +901,19 @@ fn builtin_signature_methods<'a, L: TemplateLanguage<'a> + ?Sized>(
         "email",
         |_language, _diagnostics, _build_ctx, self_property, function| {
             function.expect_no_arguments()?;
-            let out_property = self_property.map(|signature| signature.email);
-            Ok(L::wrap_string(out_property))
+            let out_property = self_property.map(|signature| signature.email.into());
+            Ok(L::wrap_email(out_property))
         },
     );
     map.insert(
         "username",
-        |_language, _diagnostics, _build_ctx, self_property, function| {
+        |_language, diagnostics, _build_ctx, self_property, function| {
             function.expect_no_arguments()?;
+            // TODO: Remove in jj 0.30+
+            diagnostics.add_warning(TemplateParseError::expression(
+                "username() is deprecated; use email().local() instead",
+                function.name_span,
+            ));
             let out_property = self_property.map(|signature| {
                 let (username, _) = text_util::split_email(&signature.email);
                 username.to_owned()
@@ -790,6 +927,36 @@ fn builtin_signature_methods<'a, L: TemplateLanguage<'a> + ?Sized>(
             function.expect_no_arguments()?;
             let out_property = self_property.map(|signature| signature.timestamp);
             Ok(L::wrap_timestamp(out_property))
+        },
+    );
+    map
+}
+
+fn builtin_email_methods<'a, L: TemplateLanguage<'a> + ?Sized>(
+) -> TemplateBuildMethodFnMap<'a, L, Email> {
+    // Not using maplit::hashmap!{} or custom declarative macro here because
+    // code completion inside macro is quite restricted.
+    let mut map = TemplateBuildMethodFnMap::<L, Email>::new();
+    map.insert(
+        "local",
+        |_language, _diagnostics, _build_ctx, self_property, function| {
+            function.expect_no_arguments()?;
+            let out_property = self_property.map(|email| {
+                let (local, _) = text_util::split_email(&email.0);
+                local.to_owned()
+            });
+            Ok(L::wrap_string(out_property))
+        },
+    );
+    map.insert(
+        "domain",
+        |_language, _diagnostics, _build_ctx, self_property, function| {
+            function.expect_no_arguments()?;
+            let out_property = self_property.map(|email| {
+                let (_, domain) = text_util::split_email(&email.0);
+                domain.unwrap_or_default().to_owned()
+            });
+            Ok(L::wrap_string(out_property))
         },
     );
     map
@@ -1126,6 +1293,50 @@ fn builtin_functions<'a, L: TemplateLanguage<'a> + ?Sized>() -> TemplateBuildFun
         });
         Ok(L::wrap_template(Box::new(template)))
     });
+    map.insert("pad_start", |language, diagnostics, build_ctx, function| {
+        let ([width_node, content_node], [fill_char_node]) =
+            function.expect_named_arguments(&["", "", "fill_char"])?;
+        let width = expect_usize_expression(language, diagnostics, build_ctx, width_node)?;
+        let content = expect_template_expression(language, diagnostics, build_ctx, content_node)?;
+        let fill_char = fill_char_node
+            .map(|node| expect_template_expression(language, diagnostics, build_ctx, node))
+            .transpose()?;
+        let template = new_pad_template(content, fill_char, width, text_util::write_padded_start);
+        Ok(L::wrap_template(template))
+    });
+    map.insert("pad_end", |language, diagnostics, build_ctx, function| {
+        let ([width_node, content_node], [fill_char_node]) =
+            function.expect_named_arguments(&["", "", "fill_char"])?;
+        let width = expect_usize_expression(language, diagnostics, build_ctx, width_node)?;
+        let content = expect_template_expression(language, diagnostics, build_ctx, content_node)?;
+        let fill_char = fill_char_node
+            .map(|node| expect_template_expression(language, diagnostics, build_ctx, node))
+            .transpose()?;
+        let template = new_pad_template(content, fill_char, width, text_util::write_padded_end);
+        Ok(L::wrap_template(template))
+    });
+    map.insert(
+        "truncate_start",
+        |language, diagnostics, build_ctx, function| {
+            let [width_node, content_node] = function.expect_exact_arguments()?;
+            let width = expect_usize_expression(language, diagnostics, build_ctx, width_node)?;
+            let content =
+                expect_template_expression(language, diagnostics, build_ctx, content_node)?;
+            let template = new_truncate_template(content, width, text_util::write_truncated_start);
+            Ok(L::wrap_template(template))
+        },
+    );
+    map.insert(
+        "truncate_end",
+        |language, diagnostics, build_ctx, function| {
+            let [width_node, content_node] = function.expect_exact_arguments()?;
+            let width = expect_usize_expression(language, diagnostics, build_ctx, width_node)?;
+            let content =
+                expect_template_expression(language, diagnostics, build_ctx, content_node)?;
+            let template = new_truncate_template(content, width, text_util::write_truncated_end);
+            Ok(L::wrap_template(template))
+        },
+    );
     map.insert("label", |language, diagnostics, build_ctx, function| {
         let [label_node, content_node] = function.expect_exact_arguments()?;
         let label_property =
@@ -1207,6 +1418,54 @@ fn builtin_functions<'a, L: TemplateLanguage<'a> + ?Sized>() -> TemplateBuildFun
     map
 }
 
+fn new_pad_template<'a, W>(
+    content: Box<dyn Template + 'a>,
+    fill_char: Option<Box<dyn Template + 'a>>,
+    width: Box<dyn TemplateProperty<Output = usize> + 'a>,
+    write_padded: W,
+) -> Box<dyn Template + 'a>
+where
+    W: Fn(&mut dyn Formatter, &FormatRecorder, &FormatRecorder, usize) -> io::Result<()> + 'a,
+{
+    let default_fill_char = FormatRecorder::with_data(" ");
+    let template = ReformatTemplate::new(content, move |formatter, recorded| {
+        let width = match width.extract() {
+            Ok(width) => width,
+            Err(err) => return formatter.handle_error(err),
+        };
+        let mut fill_char_recorder;
+        let recorded_fill_char = if let Some(fill_char) = &fill_char {
+            let rewrap = formatter.rewrap_fn();
+            fill_char_recorder = FormatRecorder::new();
+            fill_char.format(&mut rewrap(&mut fill_char_recorder))?;
+            &fill_char_recorder
+        } else {
+            &default_fill_char
+        };
+        write_padded(formatter.as_mut(), recorded, recorded_fill_char, width)
+    });
+    Box::new(template)
+}
+
+fn new_truncate_template<'a, W>(
+    content: Box<dyn Template + 'a>,
+    width: Box<dyn TemplateProperty<Output = usize> + 'a>,
+    write_truncated: W,
+) -> Box<dyn Template + 'a>
+where
+    W: Fn(&mut dyn Formatter, &FormatRecorder, usize) -> io::Result<usize> + 'a,
+{
+    let template = ReformatTemplate::new(content, move |formatter, recorded| {
+        let width = match width.extract() {
+            Ok(width) => width,
+            Err(err) => return formatter.handle_error(err),
+        };
+        write_truncated(formatter.as_mut(), recorded, width)?;
+        Ok(())
+    });
+    Box::new(template)
+}
+
 /// Builds intermediate expression tree from AST nodes.
 pub fn build_expression<'a, L: TemplateLanguage<'a> + ?Sized>(
     language: &L,
@@ -1251,8 +1510,15 @@ pub fn build_expression<'a, L: TemplateLanguage<'a> + ?Sized>(
             Ok(Expression::unlabeled(property))
         }
         ExpressionKind::Binary(op, lhs_node, rhs_node) => {
-            let property =
-                build_binary_operation(language, diagnostics, build_ctx, *op, lhs_node, rhs_node)?;
+            let property = build_binary_operation(
+                language,
+                diagnostics,
+                build_ctx,
+                *op,
+                lhs_node,
+                rhs_node,
+                node.span,
+            )?;
             Ok(Expression::unlabeled(property))
         }
         ExpressionKind::Concat(nodes) => {
@@ -1493,10 +1759,10 @@ mod tests {
             self.aliases_map.insert(decl, defn).unwrap();
         }
 
-        fn add_color(&mut self, label: &str, fg_color: crossterm::style::Color) {
+        fn add_color(&mut self, label: &str, fg: crossterm::style::Color) {
             let labels = label.split_whitespace().map(|s| s.to_owned()).collect();
             let style = formatter::Style {
-                fg_color: Some(fg_color),
+                fg: Some(fg),
                 ..Default::default()
             };
             self.color_rules.push((labels, style));
@@ -1582,14 +1848,14 @@ mod tests {
         env.add_keyword("description", || L::wrap_string(Literal("".to_owned())));
         env.add_keyword("empty", || L::wrap_boolean(Literal(true)));
 
-        insta::assert_snapshot!(env.parse_err(r#"description ()"#), @r###"
+        insta::assert_snapshot!(env.parse_err(r#"description ()"#), @r#"
          --> 1:13
           |
         1 | description ()
           |             ^---
           |
-          = expected <EOI>, `++`, `||`, or `&&`
-        "###);
+          = expected <EOI>, `++`, `||`, `&&`, `==`, `!=`, `>=`, `>`, `<=`, or `<`
+        "#);
 
         insta::assert_snapshot!(env.parse_err(r#"foo"#), @r###"
          --> 1:1
@@ -1633,6 +1899,70 @@ mod tests {
           |
           = Expected expression of type "Boolean", but actual type is "Integer"
         "###);
+        insta::assert_snapshot!(env.parse_err(r#"true == 1"#), @r#"
+         --> 1:1
+          |
+        1 | true == 1
+          | ^-------^
+          |
+          = Cannot compare expressions of type "Boolean" and "Integer"
+        "#);
+        insta::assert_snapshot!(env.parse_err(r#"true != 'a'"#), @r#"
+         --> 1:1
+          |
+        1 | true != 'a'
+          | ^---------^
+          |
+          = Cannot compare expressions of type "Boolean" and "String"
+        "#);
+        insta::assert_snapshot!(env.parse_err(r#"1 == true"#), @r#"
+         --> 1:1
+          |
+        1 | 1 == true
+          | ^-------^
+          |
+          = Cannot compare expressions of type "Integer" and "Boolean"
+        "#);
+        insta::assert_snapshot!(env.parse_err(r#"1 != 'a'"#), @r#"
+         --> 1:1
+          |
+        1 | 1 != 'a'
+          | ^------^
+          |
+          = Cannot compare expressions of type "Integer" and "String"
+        "#);
+        insta::assert_snapshot!(env.parse_err(r#"'a' == true"#), @r#"
+         --> 1:1
+          |
+        1 | 'a' == true
+          | ^---------^
+          |
+          = Cannot compare expressions of type "String" and "Boolean"
+        "#);
+        insta::assert_snapshot!(env.parse_err(r#"'a' != 1"#), @r#"
+         --> 1:1
+          |
+        1 | 'a' != 1
+          | ^------^
+          |
+          = Cannot compare expressions of type "String" and "Integer"
+        "#);
+        insta::assert_snapshot!(env.parse_err(r#"'a' == label("", "")"#), @r#"
+         --> 1:1
+          |
+        1 | 'a' == label("", "")
+          | ^------------------^
+          |
+          = Cannot compare expressions of type "String" and "Template"
+        "#);
+        insta::assert_snapshot!(env.parse_err(r#"'a' > 1"#), @r#"
+         --> 1:1
+          |
+        1 | 'a' > 1
+          | ^-----^
+          |
+          = Cannot compare expressions of type "String" and "Integer"
+        "#);
 
         insta::assert_snapshot!(env.parse_err(r#"description.first_line().foo()"#), @r###"
          --> 1:26
@@ -1729,6 +2059,15 @@ mod tests {
           = Function "if": Expected 2 to 3 arguments
         "###);
 
+        insta::assert_snapshot!(env.parse_err(r#"pad_start("foo", fill_char = "bar", "baz")"#), @r#"
+         --> 1:37
+          |
+        1 | pad_start("foo", fill_char = "bar", "baz")
+          |                                     ^---^
+          |
+          = Function "pad_start": Positional argument follows keyword argument
+        "#);
+
         insta::assert_snapshot!(env.parse_err(r#"if(label("foo", "bar"), "baz")"#), @r###"
          --> 1:4
           |
@@ -1810,6 +2149,15 @@ mod tests {
           |
           = Expected expression of type "Boolean", but actual type is "ListTemplate"
         "###);
+
+        env.add_keyword("empty_email", || {
+            L::wrap_email(Literal(Email("".to_owned())))
+        });
+        env.add_keyword("nonempty_email", || {
+            L::wrap_email(Literal(Email("local@domain".to_owned())))
+        });
+        insta::assert_snapshot!(env.render_ok(r#"if(empty_email, true, false)"#), @"false");
+        insta::assert_snapshot!(env.render_ok(r#"if(nonempty_email, true, false)"#), @"true");
     }
 
     #[test]
@@ -1835,12 +2183,50 @@ mod tests {
     }
 
     #[test]
+    fn test_relational_operation() {
+        let env = TestTemplateEnv::new();
+
+        insta::assert_snapshot!(env.render_ok(r#"1 >= 1"#), @"true");
+        insta::assert_snapshot!(env.render_ok(r#"0 >= 1"#), @"false");
+        insta::assert_snapshot!(env.render_ok(r#"2 > 1"#), @"true");
+        insta::assert_snapshot!(env.render_ok(r#"1 > 1"#), @"false");
+        insta::assert_snapshot!(env.render_ok(r#"1 <= 1"#), @"true");
+        insta::assert_snapshot!(env.render_ok(r#"2 <= 1"#), @"false");
+        insta::assert_snapshot!(env.render_ok(r#"0 < 1"#), @"true");
+        insta::assert_snapshot!(env.render_ok(r#"1 < 1"#), @"false");
+    }
+
+    #[test]
     fn test_logical_operation() {
         let mut env = TestTemplateEnv::new();
+        env.add_keyword("email1", || {
+            L::wrap_email(Literal(Email("local-1@domain".to_owned())))
+        });
+        env.add_keyword("email2", || {
+            L::wrap_email(Literal(Email("local-2@domain".to_owned())))
+        });
 
         insta::assert_snapshot!(env.render_ok(r#"!false"#), @"true");
         insta::assert_snapshot!(env.render_ok(r#"false || !false"#), @"true");
         insta::assert_snapshot!(env.render_ok(r#"false && true"#), @"false");
+        insta::assert_snapshot!(env.render_ok(r#"true == true"#), @"true");
+        insta::assert_snapshot!(env.render_ok(r#"true == false"#), @"false");
+        insta::assert_snapshot!(env.render_ok(r#"true != true"#), @"false");
+        insta::assert_snapshot!(env.render_ok(r#"true != false"#), @"true");
+        insta::assert_snapshot!(env.render_ok(r#"1 == 1"#), @"true");
+        insta::assert_snapshot!(env.render_ok(r#"1 == 2"#), @"false");
+        insta::assert_snapshot!(env.render_ok(r#"1 != 1"#), @"false");
+        insta::assert_snapshot!(env.render_ok(r#"1 != 2"#), @"true");
+        insta::assert_snapshot!(env.render_ok(r#"'a' == 'a'"#), @"true");
+        insta::assert_snapshot!(env.render_ok(r#"'a' == 'b'"#), @"false");
+        insta::assert_snapshot!(env.render_ok(r#"'a' != 'a'"#), @"false");
+        insta::assert_snapshot!(env.render_ok(r#"'a' != 'b'"#), @"true");
+        insta::assert_snapshot!(env.render_ok(r#"email1 == email1"#), @"true");
+        insta::assert_snapshot!(env.render_ok(r#"email1 == email2"#), @"false");
+        insta::assert_snapshot!(env.render_ok(r#"email1 == 'local-1@domain'"#), @"true");
+        insta::assert_snapshot!(env.render_ok(r#"email1 != 'local-2@domain'"#), @"true");
+        insta::assert_snapshot!(env.render_ok(r#"'local-1@domain' == email1"#), @"true");
+        insta::assert_snapshot!(env.render_ok(r#"'local-2@domain' != email1"#), @"true");
 
         insta::assert_snapshot!(env.render_ok(r#" !"" "#), @"true");
         insta::assert_snapshot!(env.render_ok(r#" "" || "a".lines() "#), @"true");
@@ -2341,6 +2727,52 @@ mod tests {
         [38;5;6mAB[38;5;1mx[39m
         [38;5;6mAB[38;5;3my[39m
         "###);
+    }
+
+    #[test]
+    fn test_pad_function() {
+        let mut env = TestTemplateEnv::new();
+        env.add_keyword("bad_string", || L::wrap_string(new_error_property("Bad")));
+        env.add_color("red", crossterm::style::Color::Red);
+        env.add_color("cyan", crossterm::style::Color::DarkCyan);
+
+        // Default fill_char is ' '
+        insta::assert_snapshot!(
+            env.render_ok(r"'{' ++ pad_start(5, label('red', 'foo')) ++ '}'"),
+            @"{  [38;5;9mfoo[39m}");
+        insta::assert_snapshot!(
+            env.render_ok(r"'{' ++ pad_end(5, label('red', 'foo')) ++ '}'"),
+            @"{[38;5;9mfoo[39m  }");
+
+        // Labeled fill char
+        insta::assert_snapshot!(
+            env.render_ok(r"pad_start(5, label('red', 'foo'), fill_char=label('cyan', '='))"),
+            @"[38;5;6m==[39m[38;5;9mfoo[39m");
+        insta::assert_snapshot!(
+            env.render_ok(r"pad_end(5, label('red', 'foo'), fill_char=label('cyan', '='))"),
+            @"[38;5;9mfoo[39m[38;5;6m==[39m");
+
+        // Error in fill char: the output looks odd (because the error message
+        // isn't 1-width character), but is still readable.
+        insta::assert_snapshot!(
+            env.render_ok(r"pad_start(3, 'foo', fill_char=bad_string)"),
+            @"foo");
+        insta::assert_snapshot!(
+            env.render_ok(r"pad_end(5, 'foo', fill_char=bad_string)"),
+            @"foo<<Error: Error: Bad>Bad>");
+    }
+
+    #[test]
+    fn test_truncate_function() {
+        let mut env = TestTemplateEnv::new();
+        env.add_color("red", crossterm::style::Color::Red);
+
+        insta::assert_snapshot!(
+            env.render_ok(r"truncate_start(2, label('red', 'foobar')) ++ 'baz'"),
+            @"[38;5;9mar[39mbaz");
+        insta::assert_snapshot!(
+            env.render_ok(r"truncate_end(2, label('red', 'foobar')) ++ 'baz'"),
+            @"[38;5;9mfo[39mbaz");
     }
 
     #[test]
