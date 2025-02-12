@@ -23,7 +23,7 @@ assert_matches = "1.5.0"
 async-trait = "0.1.86"
 blake2 = "0.10.6"
 bstr = "1.11.3"
-clap = { version = "4.5.28", features = [
+clap = { version = "4.5.29", features = [
     "derive",
     "deprecated",
     "wrap_help",
@@ -92,7 +92,7 @@ rpassword = "7.3.1"
 rustix = { version = "0.38.44", features = ["fs"] }
 same-file = "1.0.6"
 sapling-renderdag = "0.1.0"
-sapling-streampager = "0.10.3"
+sapling-streampager = "0.11.0"
 scm-record = "0.5.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.138"

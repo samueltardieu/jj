@@ -94,13 +94,17 @@ impl SimpleOpStore {
 
     /// Creates an empty OpStore, panics if it already exists
     pub fn init(store_path: &Path, root_data: RootOperationData) -> Self {
-        fs::create_dir(store_path.join("views")).unwrap();
-        fs::create_dir(store_path.join("operations")).unwrap();
-        Self::load(store_path, root_data)
+        let store = Self::new(store_path, root_data);
+        store.init_base_dirs().unwrap(); // TODO: propagate error
+        store
     }
 
     /// Load an existing OpStore
     pub fn load(store_path: &Path, root_data: RootOperationData) -> Self {
+        Self::new(store_path, root_data)
+    }
+
+    fn new(store_path: &Path, root_data: RootOperationData) -> Self {
         SimpleOpStore {
             path: store_path.to_path_buf(),
             root_data,
@@ -109,12 +113,19 @@ impl SimpleOpStore {
         }
     }
 
-    fn view_path(&self, id: &ViewId) -> PathBuf {
-        self.path.join("views").join(id.hex())
+    fn init_base_dirs(&self) -> Result<(), PathError> {
+        for dir in [self.views_dir(), self.operations_dir()] {
+            fs::create_dir(&dir).context(&dir)?;
+        }
+        Ok(())
     }
 
-    fn operation_path(&self, id: &OperationId) -> PathBuf {
-        self.path.join("operations").join(id.hex())
+    fn views_dir(&self) -> PathBuf {
+        self.path.join("views")
+    }
+
+    fn operations_dir(&self) -> PathBuf {
+        self.path.join("operations")
     }
 }
 
@@ -136,7 +147,7 @@ impl OpStore for SimpleOpStore {
             return Ok(View::make_root(self.root_data.root_commit_id.clone()));
         }
 
-        let path = self.view_path(id);
+        let path = self.views_dir().join(id.hex());
         let buf = fs::read(path).map_err(|err| io_to_read_error(err, id))?;
 
         let proto = crate::protos::op_store::View::decode(&*buf).map_err(|err| DecodeError {
@@ -148,8 +159,9 @@ impl OpStore for SimpleOpStore {
     }
 
     fn write_view(&self, view: &View) -> OpStoreResult<ViewId> {
+        let dir = self.views_dir();
         let temp_file =
-            NamedTempFile::new_in(&self.path).map_err(|err| io_to_write_error(err, "view"))?;
+            NamedTempFile::new_in(&dir).map_err(|err| io_to_write_error(err, "view"))?;
 
         let proto = view_to_proto(view);
         temp_file
@@ -159,7 +171,7 @@ impl OpStore for SimpleOpStore {
 
         let id = ViewId::new(blake2b_hash(view).to_vec());
 
-        persist_content_addressed_temp_file(temp_file, self.view_path(&id))
+        persist_content_addressed_temp_file(temp_file, dir.join(id.hex()))
             .map_err(|err| io_to_write_error(err, "view"))?;
         Ok(id)
     }
@@ -169,7 +181,7 @@ impl OpStore for SimpleOpStore {
             return Ok(Operation::make_root(self.root_view_id.clone()));
         }
 
-        let path = self.operation_path(id);
+        let path = self.operations_dir().join(id.hex());
         let buf = fs::read(path).map_err(|err| io_to_read_error(err, id))?;
 
         let proto =
@@ -189,8 +201,9 @@ impl OpStore for SimpleOpStore {
 
     fn write_operation(&self, operation: &Operation) -> OpStoreResult<OperationId> {
         assert!(!operation.parents.is_empty());
+        let dir = self.operations_dir();
         let temp_file =
-            NamedTempFile::new_in(&self.path).map_err(|err| io_to_write_error(err, "operation"))?;
+            NamedTempFile::new_in(&dir).map_err(|err| io_to_write_error(err, "operation"))?;
 
         let proto = operation_to_proto(operation);
         temp_file
@@ -200,7 +213,7 @@ impl OpStore for SimpleOpStore {
 
         let id = OperationId::new(blake2b_hash(operation).to_vec());
 
-        persist_content_addressed_temp_file(temp_file, self.operation_path(&id))
+        persist_content_addressed_temp_file(temp_file, dir.join(id.hex()))
             .map_err(|err| io_to_write_error(err, "operation"))?;
         Ok(id)
     }
@@ -209,7 +222,7 @@ impl OpStore for SimpleOpStore {
         &self,
         prefix: &HexPrefix,
     ) -> OpStoreResult<PrefixResolution<OperationId>> {
-        let op_dir = self.path.join("operations");
+        let op_dir = self.operations_dir();
         let find = || -> io::Result<_> {
             let matches_root = prefix.matches(&self.root_operation_id);
             let hex_prefix = prefix.hex();
@@ -294,7 +307,7 @@ impl OpStore for SimpleOpStore {
         );
 
         let prune_ops = || -> Result<(), PathError> {
-            let op_dir = self.path.join("operations");
+            let op_dir = self.operations_dir();
             for entry in op_dir.read_dir().context(&op_dir)? {
                 let entry = entry.context(&op_dir)?;
                 let Some(id) = to_op_id(&entry) else {
@@ -314,7 +327,7 @@ impl OpStore for SimpleOpStore {
         prune_ops().map_err(|err| OpStoreError::Other(err.into()))?;
 
         let prune_views = || -> Result<(), PathError> {
-            let view_dir = self.path.join("views");
+            let view_dir = self.views_dir();
             for entry in view_dir.read_dir().context(&view_dir)? {
                 let entry = entry.context(&view_dir)?;
                 let Some(id) = to_view_id(&entry) else {

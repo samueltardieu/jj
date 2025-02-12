@@ -74,6 +74,8 @@ The following functions are defined.
   Note: This function is intended for escape sequences and as such, its output
   is expected to be invisible / of no display width. Outputting content with
   nonzero display width may break wrapping, indentation etc.
+* `stringify(content: Template) -> String`: Format `content` to string. This
+  effectively removes color labels.
 * `if(condition: Boolean, then: Template[, else: Template]) -> Template`:
   Conditionally evaluate `then`/`else` template content.
 * `coalesce(content: Template...) -> Template`: Returns the first **non-empty**
@@ -87,6 +89,16 @@ The following functions are defined.
 * `config(name: String) -> ConfigValue`: Look up configuration value by `name`.
 
 ## Types
+
+### AnnotationLine type
+
+The following methods are defined.
+
+* `.commit() -> Commit`: Commit responsible for changing the relevant line.
+* `.content() -> Template`: Line content including newline character.
+* `.line_number() -> Integer`: 1-based line number.
+* `.first_line_in_hunk() -> Boolean`: False when the directly preceding line
+  references the same commit.
 
 ### Boolean type
 
@@ -318,6 +330,10 @@ defined.
 * `.substr(start: Integer, end: Integer) -> String`: Extract substring. The
   `start`/`end` indices should be specified in UTF-8 bytes. Negative values
   count from the end of the string.
+* `.escape_json() -> String`: Serializes the string in JSON format. This
+  function is useful for making machine-readable templates. For example, you
+  can use it in a template like `'{ "foo": ' ++ foo.escape_json() ++ ' }'` to
+  return a JSON/JSONL.
 
 #### String literals
 

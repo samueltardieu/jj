@@ -20,6 +20,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 * The `ui.allow-filesets` configuration option has been removed.
   [The "fileset" language](docs/filesets.md) has been enabled by default since v0.20.
 
+* `templates.annotate_commit_summary` is renamed to `templates.file_annotate`,
+  and now has an implicit `self` parameter of type `AnnotationLine`, instead of
+  `Commit`. All methods on `Commit` can be accessed with `commit.method()`, or
+  `self.commit().method()`.
+
 ### Deprecations
 
 * This release takes the first steps to make target revision required in
@@ -27,7 +32,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a warning if the user does not specify target revision  explicitly. In the near
   future those commands will fail if target revision is not specified.
 
+* `jj split` no longer moves bookmarks to the second revision created by the
+  split. Instead, local bookmarks associated with the target revision will move
+  to the first revision created by the split (which inherits the target
+  revision's change id). You can opt out of this change by setting
+  `split.legacy-bookmark-behavior = true`, but this will likely be removed in a
+  future release. [#3419](https://github.com/jj-vcs/jj/issues/3419)
+
+* The `signing.sign-all` config option has been deprecated in favor of
+  `signing.behavior`. The new option accepts `drop` (never sign), `keep` (preserve
+  existing signatures), `own` (sign own commits), or `force` (sign all commits).
+  Existing `signing.sign-all = true` translates to `signing.behavior = "own"`, and
+  `false` translates to `"keep"`.
+
+
 ### New features
+
+* `jj bookmark create`, `jj bookmark set` and `jj bookmark move` onto a hidden
+   commit make it visible.
 
 * `jj undo` now shows a hint when undoing an undo operation that the user may
    be looking for `jj op restore` instead.
@@ -35,6 +57,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 * Template functions `truncate_start()` and `truncate_end()` gained an optional
   `ellipsis` parameter; passing this prepends or appends the ellipsis to the
   content if it is truncated to fit the maximum width.
+
+* Templates now support `stringify(x)` function and string method
+  `.escape_json()`. The latter serializes the string in JSON format. It is
+  useful for making machine-readable templates by escaping problematic
+  characters like `\n`.
+
+* The description of commits backed out by `jj backout` can now be configured
+  using `templates.backout_description`.
+
+* New `AnnotationLine` templater type. Used in `templates.file_annotate`.
+  Provides `self.commit()`, `.content()`, `.line_number()`, and
+  `.first_line_in_hunk()`.
 
 ### Fixed bugs
 
